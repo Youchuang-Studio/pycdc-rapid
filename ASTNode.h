@@ -585,13 +585,17 @@ public:
 
     ASTCondBlock(ASTBlock::BlkType blktype, int end, PycRef<ASTNode> cond,
                  bool negative = false)
-        : ASTBlock(blktype, end), m_cond(std::move(cond)), m_negative(negative) { }
+        : ASTBlock(blktype, end), m_cond(std::move(cond)), m_except_var(),
+          m_negative(negative) { }
 
     PycRef<ASTNode> cond() const { return m_cond; }
+    PycRef<ASTNode> exceptVar() const { return m_except_var; }
     bool negative() const { return m_negative; }
+    void setExceptVar(PycRef<ASTNode> except_var) { m_except_var = std::move(except_var); }
 
 private:
     PycRef<ASTNode> m_cond;
+    PycRef<ASTNode> m_except_var;
     bool m_negative;
 };
 
