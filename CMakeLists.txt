@@ -23,55 +23,55 @@ elseif(MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 endif()
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_library(pycxx STATIC
-    bytecode.cpp
-    data.cpp
-    pyc_code.cpp
-    pyc_module.cpp
-    pyc_numeric.cpp
-    pyc_object.cpp
-    pyc_sequence.cpp
-    pyc_string.cpp
-    bytes/python_1_0.cpp
-    bytes/python_1_1.cpp
-    bytes/python_1_3.cpp
-    bytes/python_1_4.cpp
-    bytes/python_1_5.cpp
-    bytes/python_1_6.cpp
-    bytes/python_2_0.cpp
-    bytes/python_2_1.cpp
-    bytes/python_2_2.cpp
-    bytes/python_2_3.cpp
-    bytes/python_2_4.cpp
-    bytes/python_2_5.cpp
-    bytes/python_2_6.cpp
-    bytes/python_2_7.cpp
-    bytes/python_3_0.cpp
-    bytes/python_3_1.cpp
-    bytes/python_3_2.cpp
-    bytes/python_3_3.cpp
-    bytes/python_3_4.cpp
-    bytes/python_3_5.cpp
-    bytes/python_3_6.cpp
-    bytes/python_3_7.cpp
-    bytes/python_3_8.cpp
-    bytes/python_3_9.cpp
-    bytes/python_3_10.cpp
-    bytes/python_3_11.cpp
-    bytes/python_3_12.cpp
-    bytes/python_3_13.cpp
-    bytes/python_3_14.cpp
+    src/bytecode.cpp
+    src/data.cpp
+    src/pyc_code.cpp
+    src/pyc_module.cpp
+    src/pyc_numeric.cpp
+    src/pyc_object.cpp
+    src/pyc_sequence.cpp
+    src/pyc_string.cpp
+    src/bytes/python_1_0.cpp
+    src/bytes/python_1_1.cpp
+    src/bytes/python_1_3.cpp
+    src/bytes/python_1_4.cpp
+    src/bytes/python_1_5.cpp
+    src/bytes/python_1_6.cpp
+    src/bytes/python_2_0.cpp
+    src/bytes/python_2_1.cpp
+    src/bytes/python_2_2.cpp
+    src/bytes/python_2_3.cpp
+    src/bytes/python_2_4.cpp
+    src/bytes/python_2_5.cpp
+    src/bytes/python_2_6.cpp
+    src/bytes/python_2_7.cpp
+    src/bytes/python_3_0.cpp
+    src/bytes/python_3_1.cpp
+    src/bytes/python_3_2.cpp
+    src/bytes/python_3_3.cpp
+    src/bytes/python_3_4.cpp
+    src/bytes/python_3_5.cpp
+    src/bytes/python_3_6.cpp
+    src/bytes/python_3_7.cpp
+    src/bytes/python_3_8.cpp
+    src/bytes/python_3_9.cpp
+    src/bytes/python_3_10.cpp
+    src/bytes/python_3_11.cpp
+    src/bytes/python_3_12.cpp
+    src/bytes/python_3_13.cpp
+    src/bytes/python_3_14.cpp
 )
 
-add_executable(pycdas pycdas.cpp)
+add_executable(pycdas src/pycdas.cpp)
 target_link_libraries(pycdas pycxx)
 
 install(TARGETS pycdas
     RUNTIME DESTINATION bin)
 
-add_executable(pycdc pycdc.cpp ASTree.cpp ASTNode.cpp)
+add_executable(pycdc src/pycdc.cpp src/ASTree.cpp src/ASTNode.cpp)
 target_link_libraries(pycdc pycxx)
 if(MSVC)
     target_link_options(pycdc PRIVATE /STACK:16777216)
