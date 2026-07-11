@@ -20,7 +20,7 @@ Decompyle++ includes two tools:
 
 Prebuilt binaries:
 
-https://github.com/Techuouo520/pycdc-rapid/releases
+https://github.com/Youchuang-Studio/pycdc-rapid/releases
 
 ## Building
 
@@ -29,7 +29,7 @@ Generate a project or makefile with CMake, then build the generated project.
 Build commands:
 
 ```bash
-git clone https://github.com/Techuouo520/pycdc-rapid.git
+git clone https://github.com/Youchuang-Studio/pycdc-rapid.git
 cd pycdc-rapid
 mkdir build && cd build
 cmake ..
@@ -97,9 +97,9 @@ Examples:
 ./pycdc -c -v 3.14 example.marshal
 ```
 
-## Documentation
+## Contributing
 
-- [中文文档](docs/zh-cn/zh_cn.md)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for issue-report and pull-request requirements.
 
 ## Upstream
 
@@ -128,8 +128,7 @@ See `LICENSE` for details.
 
 ## Bilibili
 
-Personal homepage:  
-https://space.bilibili.com/1934537611
+Personal homepage: [Tech悠悠](https://space.bilibili.com/1934537611)
 
 ## Sponsor
 
