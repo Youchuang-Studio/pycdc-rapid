@@ -1,0 +1,19 @@
+def nested_try_in_for ( items ) : <EOL>
+<INDENT>
+values = [ ] <EOL>
+for item in items : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if not item : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+values . append ( int ( item ) ) <EOL>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+values . append ( - 1 ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return values <EOL>

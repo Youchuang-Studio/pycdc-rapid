@@ -1,0 +1,118 @@
+def with_for_return ( path ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+if line . strip ( ) : <EOL>
+<INDENT>
+return line <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return '' <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return '' <EOL>
+<OUTDENT>
+<OUTDENT>
+def with_for_continue ( path ) : <EOL>
+<INDENT>
+values = [ ] <EOL>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+line = line . strip ( ) <EOL>
+if not line : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+values . append ( line ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return values <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return values <EOL>
+<OUTDENT>
+<OUTDENT>
+def nested_try_in_for ( items ) : <EOL>
+<INDENT>
+values = [ ] <EOL>
+for item in items : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if not item : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+values . append ( int ( item ) ) <EOL>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+values . append ( - 1 ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return values <EOL>
+<OUTDENT>
+def for_in_outer_try ( items ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+for item in items : <EOL>
+<INDENT>
+if item == 'stop' : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+if item : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+<OUTDENT>
+return len ( items ) <EOL>
+<OUTDENT>
+except TypeError : <EOL>
+<INDENT>
+return 0 <EOL>
+<OUTDENT>
+<OUTDENT>
+def nested_with_try_for ( path , values ) : <EOL>
+<INDENT>
+result = [ ] <EOL>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if line . strip ( ) in values : <EOL>
+<INDENT>
+result . append ( line ) <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+<OUTDENT>
+except AttributeError : <EOL>
+<INDENT>
+result . append ( 'bad' ) <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return result <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return result <EOL>

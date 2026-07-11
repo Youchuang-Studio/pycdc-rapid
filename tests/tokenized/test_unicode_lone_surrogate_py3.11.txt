@@ -1,0 +1,2 @@
+value = '\ud800' <EOL>
+valid_unicode = 'café 😀' <EOL>

@@ -1,0 +1,22 @@
+def read_nonempty_lines ( path ) : <EOL>
+<INDENT>
+lines = [ ] <EOL>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+line = line . strip ( ) <EOL>
+if not line : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+lines . append ( line ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return lines <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return [ ] <EOL>

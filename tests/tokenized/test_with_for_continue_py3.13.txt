@@ -1,0 +1,22 @@
+def with_for_continue ( path ) : <EOL>
+<INDENT>
+values = [ ] <EOL>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+line = line . strip ( ) <EOL>
+if not line : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+values . append ( line ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return values <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return values <EOL>

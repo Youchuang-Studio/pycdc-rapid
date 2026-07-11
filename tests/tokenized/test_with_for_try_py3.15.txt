@@ -1,0 +1,37 @@
+def collect_lines ( path , accepted ) : <EOL>
+<INDENT>
+result = [ ] <EOL>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+value = line . strip ( ) <EOL>
+if not value : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+if value in accepted : <EOL>
+<INDENT>
+result . append ( value ) <EOL>
+<OUTDENT>
+<OUTDENT>
+except AttributeError : <EOL>
+<INDENT>
+result . append ( 'invalid' ) <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return result <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return result <EOL>
+<OUTDENT>
+<OUTDENT>
+def choose ( flag ) : <EOL>
+<INDENT>
+return lambda value : value if flag else None <EOL>

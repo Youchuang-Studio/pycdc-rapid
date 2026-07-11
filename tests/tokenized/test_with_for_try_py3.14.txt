@@ -1,0 +1,36 @@
+def with_for_try ( path , values ) : <EOL>
+<INDENT>
+result = [ ] <EOL>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if line . strip ( ) in values : <EOL>
+<INDENT>
+result . append ( line ) <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+<OUTDENT>
+except AttributeError : <EOL>
+<INDENT>
+result . append ( 'bad' ) <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return result <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return result <EOL>
+<OUTDENT>
+<OUTDENT>
+def callback ( flag ) : <EOL>
+<INDENT>
+return lambda event : event if flag else None <EOL>
