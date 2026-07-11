@@ -63,6 +63,7 @@ add_library(pycxx STATIC
     src/bytes/python_3_12.cpp
     src/bytes/python_3_13.cpp
     src/bytes/python_3_14.cpp
+    src/bytes/python_3_15.cpp
 )
 
 add_executable(pycdas src/pycdas.cpp)
