@@ -20,7 +20,7 @@ Decompyle++ 包含两个工具：
 
 预编译版本：
 
-https://github.com/Techuouo520/pycdc-rapid/releases
+https://github.com/Youchuang-Studio/pycdc-rapid/releases
 
 ## 编译
 
@@ -29,7 +29,7 @@ https://github.com/Techuouo520/pycdc-rapid/releases
 编译命令：
 
 ```bash
-git clone https://github.com/Techuouo520/pycdc-rapid.git
+git clone https://github.com/Youchuang-Studio/pycdc-rapid.git
 cd pycdc-rapid
 mkdir build && cd build
 cmake ..
@@ -97,9 +97,9 @@ marshal.dumps(compile(...))
 ./pycdc -c -v 3.14 example.marshal
 ```
 
-## 文档
+## 参与贡献
 
-- [English](../../README.markdown)
+Issue 与 PR 的提交要求请见[贡献指南](contributing.md)。
 
 ## 上游项目
 
@@ -128,8 +128,7 @@ GNU General Public License v3.0。
 
 ## 哔哩哔哩
 
-个人主页：  
-https://space.bilibili.com/1934537611
+个人主页：[Tech悠悠](https://space.bilibili.com/1934537611)
 
 ## 赞赏
 
