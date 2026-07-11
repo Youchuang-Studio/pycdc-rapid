@@ -397,10 +397,12 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
     std::vector<int> befores;
     std::vector<std::pair<int, int>> fwdJumps;   /* (pos, target) */
     std::map<int, int> opcodeAt;                 /* pos -> opcode */
+    std::map<int, int> nextAt;                   /* pos -> next instruction */
     while (!src.atEof()) {
         int p = pos;
         bc_next(src, mod, opcode, operand, pos);
         opcodeAt[p] = opcode;
+        nextAt[p] = pos;
         if (opcode == Pyc::BEFORE_WITH)
             befores.push_back(p);
         else if (opcode == Pyc::JUMP_FORWARD_A)
@@ -409,27 +411,31 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
     for (int bp : befores) {
         int bodyEnd = -1, handler = -1;
         for (const auto& e : entries) {
-            if (e.start_offset > bp) {
+            if (e.start_offset <= bp)
+                continue;
+            auto h0 = opcodeAt.find(e.target);
+            if (h0 == opcodeAt.end() || h0->second != Pyc::PUSH_EXC_INFO)
+                continue;
+            auto h1 = opcodeAt.find(nextAt[e.target]);
+            if (h1 == opcodeAt.end() || h1->second != Pyc::WITH_EXCEPT_START)
+                continue;
+            handler = e.target;
+            break;
+        }
+        if (handler < 0)
+            continue;
+
+        /* Python 3.13 splits a with body around branches, but every protected
+           range uses the same WITH_EXCEPT_START handler. The normal cleanup
+           begins after the last such range, not after the first one. */
+        for (const auto& e : entries) {
+            if (e.target == handler && e.push_lasti && e.start_offset > bp
+                    && e.end_offset > bodyEnd)
                 bodyEnd = e.end_offset;
-                handler = e.target;
-                break;
-            }
         }
-        if (bodyEnd < 0 || handler < 0)
+        if (bodyEnd < 0)
             continue;
-        /* Confirm the handler is a genuine with-cleanup: it must begin with
-           PUSH_EXC_INFO followed by WITH_EXCEPT_START. */
-        auto h0 = opcodeAt.find(handler);
-        if (h0 == opcodeAt.end() || h0->second != Pyc::PUSH_EXC_INFO)
-            continue;
-        bool hasWithExcept = false;
-        for (const auto& kv : opcodeAt) {
-            if (kv.first > handler && kv.first <= handler + 4) {
-                if (kv.second == Pyc::WITH_EXCEPT_START) { hasWithExcept = true; break; }
-            }
-        }
-        if (!hasWithExcept)
-            continue;
+
         int resume = -1;
         for (const auto& jp : fwdJumps) {
             /* The normal-exit jump sits between the body end and the handler and
@@ -437,6 +443,20 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
             if (jp.first >= bodyEnd && jp.first < handler && jp.second >= handler) {
                 resume = jp.second;
                 break;
+            }
+        }
+        if (resume < 0 && opcodeAt[bodyEnd] == Pyc::LOAD_CONST_A) {
+            /* A terminal 3.13 with body has no jump over the handler: the
+               implicit __exit__(None, None, None) call is followed directly
+               by return/control-flow outside the with statement. */
+            for (const auto& kv : nextAt) {
+                int cleanup = kv.first;
+                if (cleanup <= bodyEnd || cleanup >= handler)
+                    continue;
+                if (opcodeAt[cleanup] == Pyc::POP_TOP) {
+                    resume = kv.second;
+                    break;
+                }
             }
         }
         if (resume < 0)
@@ -2321,6 +2341,16 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 if (cond.type() == ASTNode::NODE_COMPARE
                         && cond.cast<ASTCompare>()->op() == ASTCompare::CMP_EXCEPTION) {
                     int except_end = offs;
+                    PycBuffer target_source(code->code()->value(), code->code()->length());
+                    int target_opcode = 0, target_operand = 0, target_pos = offs;
+                    target_source.setPos(offs);
+                    bc_next(target_source, mod, target_opcode, target_operand, target_pos);
+                    if (target_opcode == Pyc::RETURN_VALUE) {
+                        /* Python 3.13 can dispatch a failed exception match to
+                           the RETURN_VALUE that terminates the current clause.
+                           Keep that return inside the except block. */
+                        except_end = target_pos;
+                    }
                     if (curblock->blktype() == ASTBlock::BLK_EXCEPT
                             && curblock.cast<ASTCondBlock>()->cond() == NULL) {
                         /* Refining the initial (type-less) except handler. The
