@@ -43,6 +43,61 @@ static PycRef<ASTNode> StackPopTop(FastStack& stack)
     return node;
 }
 
+static bool ast_same_name(PycRef<ASTNode> left, PycRef<ASTNode> right)
+{
+    if (left == nullptr || right == nullptr
+            || left.type() != ASTNode::NODE_NAME || right.type() != ASTNode::NODE_NAME)
+        return false;
+    PycRef<PycString> leftName = left.cast<ASTName>()->name();
+    PycRef<PycString> rightName = right.cast<ASTName>()->name();
+    return leftName != nullptr && rightName != nullptr
+            && leftName->strValue() == rightName->strValue();
+}
+
+static bool ast_attach_decorators(PycRef<ASTBlock> curblock,
+        PycRef<ASTNode> value, PycRef<ASTNode> name)
+{
+    if (value == nullptr || value.type() != ASTNode::NODE_CALL
+            || name == nullptr || name.type() != ASTNode::NODE_NAME
+            || curblock == nullptr || curblock->nodes().empty())
+        return false;
+
+    PycRef<ASTNode> previous = curblock->nodes().back();
+    if (previous.type() != ASTNode::NODE_STORE)
+        return false;
+    PycRef<ASTNode> definition = previous.cast<ASTStore>()->src();
+    if ((definition.type() != ASTNode::NODE_FUNCTION && definition.type() != ASTNode::NODE_CLASS)
+            || !ast_same_name(previous.cast<ASTStore>()->dest(), name))
+        return false;
+
+    if (definition.type() == ASTNode::NODE_FUNCTION) {
+        PycRef<PycCode> functionCode = definition.cast<ASTFunction>()->code()
+                .cast<ASTObject>()->object().cast<PycCode>();
+        if (functionCode->name()->isEqual("<lambda>"))
+            return false;
+    }
+
+    std::vector<PycRef<ASTNode>> decorators;
+    PycRef<ASTNode> callNode = value;
+    while (callNode.type() == ASTNode::NODE_CALL) {
+        PycRef<ASTCall> call = callNode.cast<ASTCall>();
+        if (call->pparams().size() != 1 || !call->kwparams().empty())
+            return false;
+        decorators.push_back(call->func());
+        callNode = call->pparams().front();
+    }
+    if (!ast_same_name(callNode, name))
+        return false;
+
+    for (const auto& decorator : decorators) {
+        if (definition.type() == ASTNode::NODE_FUNCTION)
+            definition.cast<ASTFunction>()->addDecorator(decorator);
+        else
+            definition.cast<ASTClass>()->addDecorator(decorator);
+    }
+    return true;
+}
+
 static int ast_inline_cache_entries(PycModule* mod, int opcode)
 {
     if (mod->verCompare(3, 11) < 0)
@@ -4153,7 +4208,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 
                     if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
-                    } else {
+                    } else if (!ast_attach_decorators(curblock, value, name)) {
                         curblock->append(new ASTStore(value, name));
                     }
                 }
@@ -4269,7 +4324,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         curblock.cast<ASTWithBlock>()->setVar(name);
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
-                    } else {
+                    } else if (!ast_attach_decorators(curblock, value, name)) {
                         curblock->append(new ASTStore(value, name));
                     }
                 }
@@ -4312,7 +4367,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     stack.pop();
                     if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
-                    } else {
+                    } else if (!ast_attach_decorators(curblock, value, name)) {
                         curblock->append(new ASTStore(value, name));
                     }
                 }
@@ -4386,7 +4441,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         curblock.cast<ASTWithBlock>()->setVar(name);
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
-                    } else {
+                    } else if (!ast_attach_decorators(curblock, value, name)) {
                         curblock->append(new ASTStore(value, name));
 
                         if (value.type() == ASTNode::NODE_INVALID)
@@ -5591,6 +5646,12 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
                     isLambda = true;
                 } else {
                     pyc_output << "\n";
+                    for (const auto& decorator : src.cast<ASTFunction>()->decorators()) {
+                        start_line(cur_indent, pyc_output);
+                        pyc_output << "@";
+                        print_src(decorator, mod, pyc_output);
+                        pyc_output << "\n";
+                    }
                     start_line(cur_indent, pyc_output);
                     if (code_src->flags() & PycCode::CO_COROUTINE)
                         pyc_output << "async ";
@@ -5661,6 +5722,12 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
                 inLambda = preLambda;
             } else if (src.type() == ASTNode::NODE_CLASS) {
                 pyc_output << "\n";
+                for (const auto& decorator : src.cast<ASTClass>()->decorators()) {
+                    start_line(cur_indent, pyc_output);
+                    pyc_output << "@";
+                    print_src(decorator, mod, pyc_output);
+                    pyc_output << "\n";
+                }
                 start_line(cur_indent, pyc_output);
                 pyc_output << "class ";
                 print_src(dest, mod, pyc_output);
