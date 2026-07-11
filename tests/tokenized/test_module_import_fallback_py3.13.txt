@@ -1,0 +1,26 @@
+try : <EOL>
+<INDENT>
+import missing_config as config <EOL>
+imported_value = config . value <EOL>
+<OUTDENT>
+except ImportError : <EOL>
+<INDENT>
+imported_value = 'default' <EOL>
+<OUTDENT>
+if not imported_value : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+with open ( 'config.txt' , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+value = source . read ( ) . strip ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+value = '' <EOL>
+<OUTDENT>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+value = imported_value <EOL>

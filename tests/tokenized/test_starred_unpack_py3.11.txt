@@ -1,0 +1,13 @@
+def unpack_targets ( seq , obj , container ) : <EOL>
+<INDENT>
+a , * b = seq <EOL>
+* head , tail = seq <EOL>
+first , * middle , last = seq <EOL>
+x , * rest , y , z = seq <EOL>
+obj . a , * obj . rest = seq <EOL>
+container [ 0 ] , * container [ 1 : ] = seq <EOL>
+<OUTDENT>
+def unpack_globals ( seq ) : <EOL>
+<INDENT>
+global first_global , middle_global , last_global <EOL>
+first_global , * middle_global , last_global = seq <EOL>

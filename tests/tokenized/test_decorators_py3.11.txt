@@ -1,0 +1,15 @@
+@ staticmethod <EOL>
+def simple ( ) : <EOL>
+<INDENT>
+return 1 <EOL>
+<OUTDENT>
+@ app . route <EOL>
+@ cache <EOL>
+def stacked ( ) : <EOL>
+<INDENT>
+return 2 <EOL>
+<OUTDENT>
+@ registry . register <EOL>
+class Registered : <EOL>
+<INDENT>
+pass <EOL>

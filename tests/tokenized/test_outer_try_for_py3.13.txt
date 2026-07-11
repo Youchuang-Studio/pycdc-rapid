@@ -1,0 +1,20 @@
+def for_in_outer_try ( items ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+for item in items : <EOL>
+<INDENT>
+if item == 'stop' : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+if item : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+<OUTDENT>
+return len ( items ) <EOL>
+<OUTDENT>
+except TypeError : <EOL>
+<INDENT>
+return 0 <EOL>

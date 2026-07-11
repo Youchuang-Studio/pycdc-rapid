@@ -1,0 +1,19 @@
+def with_for_return ( path ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+with open ( path , 'r' , encoding = 'utf-8' ) as source : <EOL>
+<INDENT>
+for line in source : <EOL>
+<INDENT>
+if line . strip ( ) : <EOL>
+<INDENT>
+return line <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return '' <EOL>
+<OUTDENT>
+except FileNotFoundError : <EOL>
+<INDENT>
+return '' <EOL>
