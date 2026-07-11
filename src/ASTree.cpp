@@ -390,7 +390,8 @@ static PycRef<ASTComprehension> SynthGenexpr(PycRef<ASTNode> node)
 static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
                            const std::vector<PycExceptionTableEntry>& entries,
                            std::map<int, int>& bodyEndByBefore,
-                           std::map<int, int>& resumeByBodyEnd)
+                           std::map<int, int>& resumeByBodyEnd,
+                           std::map<int, int>& returnCleanupUntil)
 {
     PycBuffer src(code->code()->value(), code->code()->length());
     int opcode, operand, pos = 0;
@@ -403,11 +404,44 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
         bc_next(src, mod, opcode, operand, pos);
         opcodeAt[p] = opcode;
         nextAt[p] = pos;
-        if (opcode == Pyc::BEFORE_WITH)
+        if (opcode == Pyc::BEFORE_WITH
+                || (opcode == Pyc::LOAD_SPECIAL_A && operand == 0))
             befores.push_back(p);
         else if (opcode == Pyc::JUMP_FORWARD_A)
             fwdJumps.push_back(std::make_pair(p, pos + operand * 2));
     }
+    auto nextRealInstruction = [&opcodeAt, &nextAt](int at) {
+        std::map<int, int>::const_iterator next = nextAt.find(at);
+        if (next == nextAt.end())
+            return -1;
+        int p = next->second;
+        while (p >= 0) {
+            std::map<int, int>::const_iterator op = opcodeAt.find(p);
+            if (op == opcodeAt.end() || op->second != Pyc::CACHE)
+                break;
+            next = nextAt.find(p);
+            if (next == nextAt.end())
+                return -1;
+            p = next->second;
+        }
+        return p;
+    };
+    auto hasNormalCleanupAfter = [&opcodeAt, &nextRealInstruction](int bodyEnd) {
+        int p = bodyEnd;
+        while (p >= 0 && (opcodeAt[p] == Pyc::END_FOR
+                || opcodeAt[p] == Pyc::INSTRUMENTED_END_FOR_A
+                || opcodeAt[p] == Pyc::POP_TOP))
+            p = nextRealInstruction(p);
+        for (int i = 0; i < 3; i++) {
+            if (p < 0 || opcodeAt[p] != Pyc::LOAD_CONST_A)
+                return false;
+            p = nextRealInstruction(p);
+        }
+        if (p < 0 || opcodeAt[p] != Pyc::CALL_A)
+            return false;
+        p = nextRealInstruction(p);
+        return p >= 0 && opcodeAt[p] == Pyc::POP_TOP;
+    };
     for (int bp : befores) {
         int bodyEnd = -1, handler = -1;
         for (const auto& e : entries) {
@@ -432,6 +466,19 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
             if (e.target == handler && e.push_lasti && e.start_offset > bp
                     && e.end_offset > bodyEnd)
                 bodyEnd = e.end_offset;
+        }
+        /* A handler can protect its own re-raise cleanup with an entry ending
+           at the handler address.  That entry is not part of the with body;
+           in this one shape select the last protected range followed by the
+           canonical normal __exit__ call instead. */
+        if (bodyEnd == handler) {
+            bodyEnd = -1;
+            for (const auto& e : entries) {
+                if (e.target == handler && e.push_lasti && e.start_offset > bp
+                        && e.end_offset < handler && e.end_offset > bodyEnd
+                        && hasNormalCleanupAfter(e.end_offset))
+                    bodyEnd = e.end_offset;
+            }
         }
         if (bodyEnd < 0)
             continue;
@@ -463,9 +510,54 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
             continue;   /* only the clean jump-over-handler shape */
         bodyEndByBefore[bp] = bodyEnd;
         resumeByBodyEnd[bodyEnd] = resume;
+
+        /* A return from inside a Python 3.13 with body first shuffles the
+           return value around the hidden __exit__ callable, then invokes the
+           callable with three None arguments.  That housekeeping is not a
+           source expression; if interpreted normally it becomes spurious
+           `manager` / `value(None, None)` nodes and loses the return value.
+           Recognize only the exact compiler sequence and leave the following
+           RETURN_VALUE to consume the original value. */
+        for (const auto& kv : opcodeAt) {
+            int cleanup = kv.first;
+            if (cleanup < bp || cleanup >= bodyEnd || kv.second != Pyc::SWAP_A)
+                continue;
+            int p = nextRealInstruction(cleanup);
+            if (p < 0 || opcodeAt[p] != Pyc::POP_TOP)
+                continue;
+            p = nextRealInstruction(p);
+            if (p < 0 || opcodeAt[p] != Pyc::SWAP_A)
+                continue;
+            p = nextRealInstruction(p);
+            bool noneArgs = true;
+            for (int i = 0; i < 3; i++) {
+                if (p < 0 || opcodeAt[p] != Pyc::LOAD_CONST_A) {
+                    noneArgs = false;
+                    break;
+                }
+                p = nextRealInstruction(p);
+            }
+            if (!noneArgs || p < 0 || opcodeAt[p] != Pyc::CALL_A)
+                continue;
+            p = nextRealInstruction(p);
+            if (p < 0 || opcodeAt[p] != Pyc::POP_TOP)
+                continue;
+            int ret = nextRealInstruction(p);
+            if (ret < 0)
+                continue;
+            if (opcodeAt[ret] == Pyc::RETURN_VALUE
+                    || opcodeAt[ret] == Pyc::INSTRUMENTED_RETURN_VALUE_A) {
+                returnCleanupUntil[cleanup] = ret;
+            }
+        }
     }
 }
 
+/* Python 3.11+ exception tables describe only protected instruction ranges;
+   a normal try body can therefore end long before its handler appears in the
+   linear stream.  Record short ranges that do not hand directly into a with
+   setup.  With setup is handled by ScanWithBlocks because its implicit cleanup
+   extends the source-level body beyond the protected setup range. */
 /* Python 3.11 try/finally pre-pass. A finally compiles to: try body -> finally
    body (normal copy) -> JUMP over an exception handler that duplicates the
    finally body and re-raises. Recognize it from the exception table and record,
@@ -649,6 +741,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 {
     cleanBuild = true;
     PycBuffer source(code->code()->value(), code->code()->length());
+    const bool isModuleCode = code->name() != nullptr
+            && code->name()->isEqual("<module>");
 
     FastStack stack((mod->majorVer() == 1) ? 20 : code->stackSize());
     stackhist_t stack_hist;
@@ -663,6 +757,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
     int curpos = 0;
     int pos = 0;
     int unpack = 0;
+    int unpackStar = -1;
     bool else_pop = false;
     bool need_try = false;
     bool variable_annotations = false;
@@ -674,12 +769,18 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
     int py39_handler_cleanup_step = 0;
     int py39_handler_cleanup_target = -1;
     std::vector<PycExceptionTableEntry> exception_entries;
+    std::map<int, int> moduleImportTryEndByStart;
+    std::set<int> deferredTryEnds;
     size_t next_exception_entry = 0;
 
     /* Python 3.11 with-statement reconstruction state. */
     std::map<int, int> withBodyEndByBefore;   /* BEFORE_WITH pos -> body end */
     std::map<int, int> withResumeByBodyEnd;   /* body end -> resume offset */
+    std::map<int, int> withReturnCleanupUntil; /* cleanup start -> RETURN_VALUE */
     int with_skip_until = 0;                   /* skip cleanup region < this */
+    int with_return_cleanup_until = 0;         /* skip return __exit__ path < this */
+    std::map<int, PycRef<ASTContainerBlock> > deferredExceptContainers;
+    PycRef<ASTContainerBlock> activeDeferredExceptContainer;
 
     /* Python 3.11 try/finally reconstruction state. */
     std::map<int, int> finallyTryEndByStart;   /* entry start -> try body end */
@@ -696,8 +797,34 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 
     if (mod->verCompare(3, 11) >= 0) {
         exception_entries = code->exceptionTableEntries();
+        if (isModuleCode) {
+            PycBuffer scan(code->code()->value(), code->code()->length());
+            int scanOp = 0, scanOperand = 0, scanPos = 0;
+            std::map<int, int> opAt;
+            while (!scan.atEof()) {
+                int current = scanPos;
+                bc_next(scan, mod, scanOp, scanOperand, scanPos);
+                opAt[current] = scanOp;
+            }
+            for (const auto& entry : exception_entries) {
+                if (entry.push_lasti || entry.end_offset <= entry.start_offset
+                        || entry.end_offset >= entry.target)
+                    continue;
+                bool imports = false;
+                for (const auto& op : opAt) {
+                    if (op.first >= entry.start_offset && op.first < entry.end_offset
+                            && op.second == Pyc::IMPORT_NAME_A) {
+                        imports = true;
+                        break;
+                    }
+                }
+                if (imports)
+                    moduleImportTryEndByStart[entry.start_offset] = entry.end_offset;
+            }
+        }
         ScanWithBlocks(code, mod, exception_entries,
-                       withBodyEndByBefore, withResumeByBodyEnd);
+                       withBodyEndByBefore, withResumeByBodyEnd,
+                       withReturnCleanupUntil);
         ScanTryFinally(code, mod, exception_entries,
                        finallyTryEndByStart, finallyEndByStart, finallyResumeByEnd);
         ScanWhileLoops(code, mod, whileGuardEnd, whileBackedges);
@@ -761,6 +888,41 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             }
             with_skip_until = 0;
         }
+        if (with_return_cleanup_until > 0) {
+            if (pos < with_return_cleanup_until) {
+                curpos = pos;
+                bc_next(source, mod, opcode, operand, pos);
+                continue;
+            }
+            with_return_cleanup_until = 0;
+        }
+        auto return_cleanup = withReturnCleanupUntil.find(pos);
+        if (return_cleanup != withReturnCleanupUntil.end()) {
+            /* Keep the return value already on the evaluation stack and skip
+               only the compiler-generated __exit__(None, None, None) path. */
+            with_return_cleanup_until = return_cleanup->second;
+            curpos = pos;
+            bc_next(source, mod, opcode, operand, pos);
+            continue;
+        }
+
+        /* Python 3.13 places an exception handler for a try nested in a loop
+           after END_FOR.  Keep its completed container aside while linear
+           decoding reaches the handler, then reattach it at PUSH_EXC_INFO. */
+        auto deferred = deferredExceptContainers.find(pos);
+        if (deferred != deferredExceptContainers.end()) {
+            /* Discard the protected-region snapshot. The following exception
+               match creates the handler snapshot itself; unlike the normal
+               path there is no provisional type-less except block here. */
+            if (!stack_hist.empty()) {
+                stack = stack_hist.top();
+                stack_hist.pop();
+            }
+            blocks.push(deferred->second.cast<ASTBlock>());
+            curblock = blocks.top();
+            activeDeferredExceptContainer = deferred->second;
+            deferredExceptContainers.erase(deferred);
+        }
 
         while (next_exception_entry < exception_entries.size()
                 && exception_entries[next_exception_entry].start_offset < pos) {
@@ -797,10 +959,18 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     bool sameTryOpen = false;
                     {
                         std::stack<PycRef<ASTBlock> > tmp = blocks;
+                        bool sawTry = false;
                         while (!tmp.empty()) {
                             PycRef<ASTBlock> b = tmp.top();
                             if (b->blktype() == ASTBlock::BLK_TRY
                                     && b->end() == entry.target) {
+                                sameTryOpen = true;
+                                break;
+                            }
+                            if (b->blktype() == ASTBlock::BLK_TRY)
+                                sawTry = true;
+                            else if (sawTry && b->blktype() == ASTBlock::BLK_CONTAINER
+                                    && b.cast<ASTContainerBlock>()->except() == entry.target) {
                                 sameTryOpen = true;
                                 break;
                             }
@@ -819,7 +989,38 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         }
 
                         stack_hist.push(stack);
-                        PycRef<ASTBlock> tryblock = new ASTBlock(ASTBlock::BLK_TRY, entry.target, true);
+                        int tryEnd = entry.target;
+                        auto moduleImportEnd = moduleImportTryEndByStart.find(entry.start_offset);
+                        if (moduleImportEnd != moduleImportTryEndByStart.end())
+                            tryEnd = moduleImportEnd->second;
+                        if (mod->verCompare(3, 11) >= 0
+                                && entry.end_offset > entry.start_offset
+                                && entry.end_offset < entry.target) {
+                            int loopEnd = 0;
+                            std::stack<PycRef<ASTBlock> > pending = blocks;
+                            while (!pending.empty()) {
+                                if (pending.top()->blktype() == ASTBlock::BLK_FOR
+                                        || pending.top()->blktype() == ASTBlock::BLK_ASYNCFOR) {
+                                    loopEnd = pending.top()->end();
+                                    break;
+                                }
+                                pending.pop();
+                            }
+                            int lastProtectedEnd = entry.end_offset;
+                            for (const auto& later : exception_entries) {
+                                if (loopEnd != 0 && later.target == entry.target
+                                        && later.start_offset >= entry.end_offset
+                                        && later.start_offset < loopEnd) {
+                                    lastProtectedEnd = std::max(lastProtectedEnd,
+                                            later.end_offset);
+                                }
+                            }
+                            if (loopEnd != 0)
+                                tryEnd = lastProtectedEnd;
+                        }
+                        PycRef<ASTBlock> tryblock = new ASTBlock(ASTBlock::BLK_TRY, tryEnd, true);
+                        if (tryEnd != entry.target)
+                            deferredTryEnds.insert(tryEnd);
                         blocks.push(tryblock.cast<ASTBlock>());
                         curblock = blocks.top();
                         next_exception_entry++;
@@ -828,8 +1029,22 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             }
         }
 
+        bool delayedTryReachedPastEnd = false;
+        if (mod->verCompare(3, 11) >= 0
+                && curblock->blktype() == ASTBlock::BLK_TRY
+                && curblock->end() < pos && deferredTryEnds.count(curblock->end())
+                && blocks.size() > 2) {
+            std::stack<PycRef<ASTBlock> > pending = blocks;
+            pending.pop();
+            if (!pending.empty() && pending.top()->blktype() == ASTBlock::BLK_CONTAINER) {
+                pending.pop();
+                delayedTryReachedPastEnd = !pending.empty()
+                        && (pending.top()->blktype() == ASTBlock::BLK_FOR
+                                || pending.top()->blktype() == ASTBlock::BLK_ASYNCFOR);
+            }
+        }
         if (curblock->blktype() == ASTBlock::BLK_TRY
-                && curblock->end() == pos
+                && (curblock->end() == pos || delayedTryReachedPastEnd)
                 && blocks.size() > 1) {
             PycRef<ASTBlock> prev = curblock;
             blocks.pop();
@@ -839,39 +1054,59 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     && curblock.cast<ASTContainerBlock>()->hasExcept()) {
                 PycRef<ASTContainerBlock> cont = curblock.cast<ASTContainerBlock>();
 
-                if (mod->verCompare(3, 11) >= 0 && prev->end() < cont->except()) {
+                if (mod->verCompare(3, 11) >= 0 && prev->end() < cont->except()
+                        && deferredTryEnds.count(prev->end())) {
+                    bool deferredContainer = false;
+                    if (blocks.size() > 1) {
+                        blocks.pop();
+                        if (!blocks.empty()) {
+                            cont->append(prev.cast<ASTNode>());
+                            deferredExceptContainers[cont->except()] = cont;
+                            curblock = blocks.top();
+                            curblock->append(cont.cast<ASTNode>());
+                            deferredTryEnds.erase(prev->end());
+                            deferredContainer = true;
+                        }
+                        if (!deferredContainer)
+                            blocks.push(cont.cast<ASTBlock>());
+                    }
+                    if (!deferredContainer) {
+                        if (!stack_hist.empty()) {
+                            stack = stack_hist.top();
+                            stack_hist.pop();
+                        }
+
+                        for (const auto& node : prev->nodes()) {
+                            curblock->append(node);
+                        }
+
+                        PycRef<ASTBlock> finished = curblock;
+                        blocks.pop();
+                        curblock = blocks.top();
+
+                        for (const auto& node : finished->nodes()) {
+                            curblock->append(node);
+                        }
+
+                        continue;
+                    }
+                }
+
+                if (curblock->blktype() == ASTBlock::BLK_CONTAINER
+                        && !blocks.empty() && blocks.top() == curblock) {
                     if (!stack_hist.empty()) {
                         stack = stack_hist.top();
                         stack_hist.pop();
                     }
 
-                    for (const auto& node : prev->nodes()) {
-                        curblock->append(node);
-                    }
+                    curblock->append(prev.cast<ASTNode>());
+                    stack_hist.push(stack);
 
-                    PycRef<ASTBlock> finished = curblock;
-                    blocks.pop();
+                    PycRef<ASTBlock> except = new ASTCondBlock(ASTBlock::BLK_EXCEPT, 0, NULL, false);
+                    except->init();
+                    blocks.push(except);
                     curblock = blocks.top();
-
-                    for (const auto& node : finished->nodes()) {
-                        curblock->append(node);
-                    }
-
-                    continue;
                 }
-
-                if (!stack_hist.empty()) {
-                    stack = stack_hist.top();
-                    stack_hist.pop();
-                }
-
-                curblock->append(prev.cast<ASTNode>());
-                stack_hist.push(stack);
-
-                PycRef<ASTBlock> except = new ASTCondBlock(ASTBlock::BLK_EXCEPT, 0, NULL, false);
-                except->init();
-                blocks.push(except);
-                curblock = blocks.top();
             } else if (curblock->blktype() == ASTBlock::BLK_CONTAINER
                     && curblock.cast<ASTContainerBlock>()->hasFinally()) {
                 /* Python 3.11 try/finally: the try body is followed by the
@@ -915,7 +1150,12 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 PycRef<ASTBlock> cont = curblock;
                 blocks.pop();
                 curblock = blocks.top();
-                curblock->append(cont.cast<ASTNode>());
+                if (activeDeferredExceptContainer != NULL
+                        && cont == activeDeferredExceptContainer.cast<ASTBlock>()) {
+                    activeDeferredExceptContainer = nullptr;
+                } else {
+                    curblock->append(cont.cast<ASTNode>());
+                }
             }
         }
 
@@ -1014,6 +1254,32 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             PycRef<ASTBlock> prev = curblock;
             while (prev->end() < pos
                     && prev->blktype() != ASTBlock::BLK_MAIN) {
+                if (mod->verCompare(3, 11) >= 0
+                        && prev->blktype() == ASTBlock::BLK_TRY
+                        && blocks.size() > 2) {
+                    blocks.pop();
+                    PycRef<ASTBlock> container = blocks.top();
+                    if (container->blktype() == ASTBlock::BLK_CONTAINER
+                            && container.cast<ASTContainerBlock>()->hasExcept()
+                            && prev->end() < container.cast<ASTContainerBlock>()->except()
+                            && blocks.size() > 1) {
+                        blocks.pop();
+                        PycRef<ASTBlock> parent = blocks.top();
+                        if (parent->blktype() == ASTBlock::BLK_FOR
+                                || parent->blktype() == ASTBlock::BLK_ASYNCFOR) {
+                            container->append(prev.cast<ASTNode>());
+                            parent->append(container.cast<ASTNode>());
+                            deferredExceptContainers[
+                                    container.cast<ASTContainerBlock>()->except()] =
+                                    container.cast<ASTContainerBlock>();
+                            curblock = parent;
+                            prev = parent;
+                            continue;
+                        }
+                        blocks.push(container);
+                    }
+                    blocks.push(prev);
+                }
                 if (prev->blktype() != ASTBlock::BLK_CONTAINER) {
                     if (prev->end() == 0) {
                         break;
@@ -2345,9 +2611,12 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     int target_opcode = 0, target_operand = 0, target_pos = offs;
                     target_source.setPos(offs);
                     bc_next(target_source, mod, target_opcode, target_operand, target_pos);
-                    if (target_opcode == Pyc::RETURN_VALUE) {
+                    if (target_opcode == Pyc::RETURN_VALUE
+                            || target_opcode == Pyc::RETURN_CONST_A
+                            || target_opcode == Pyc::INSTRUMENTED_RETURN_VALUE_A
+                            || target_opcode == Pyc::INSTRUMENTED_RETURN_CONST_A) {
                         /* Python 3.13 can dispatch a failed exception match to
-                           the RETURN_VALUE that terminates the current clause.
+                           a return that terminates the current clause.
                            Keep that return inside the except block. */
                         except_end = target_pos;
                     }
@@ -2626,7 +2895,21 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             curblock = blocks.top();
                         }
                     } else {
-                        curblock->append(new ASTKeyword(ASTKeyword::KW_CONTINUE));
+                        bool hasEnclosingLoop = false;
+                        if (mod->verCompare(3, 11) >= 0) {
+                            std::stack<PycRef<ASTBlock> > pending = blocks;
+                            while (!pending.empty()) {
+                                int type = pending.top()->blktype();
+                                if (type == ASTBlock::BLK_FOR || type == ASTBlock::BLK_ASYNCFOR
+                                        || type == ASTBlock::BLK_WHILE) {
+                                    hasEnclosingLoop = true;
+                                    break;
+                                }
+                                pending.pop();
+                            }
+                        }
+                        if (mod->verCompare(3, 11) < 0 || hasEnclosingLoop)
+                            curblock->append(new ASTKeyword(ASTKeyword::KW_CONTINUE));
                     }
 
                     /* We're in a loop, this jumps back to the start */
@@ -3036,13 +3319,29 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             {
                 static const char *common_constants[] = {
                     "AssertionError", "NotImplementedError", "tuple", "all", "any",
+                    "list", "set",
                 };
-                PycRef<PycString> name = new PycString(PycObject::TYPE_STRING);
-                if (operand >= 0 && operand < 5)
+                if (operand >= 0 && operand < 7) {
+                    PycRef<PycString> name = new PycString(PycObject::TYPE_STRING);
                     name->setValue(common_constants[operand]);
-                else
+                    stack.push(new ASTName(name));
+                } else if (operand == 7) {
+                    stack.push(new ASTObject(Pyc_None));
+                } else if (operand == 8) {
+                    PycRef<PycObject> value = new PycString(PycObject::TYPE_STRING);
+                    value.cast<PycString>()->setValue("");
+                    stack.push(new ASTObject(value));
+                } else if (operand == 9) {
+                    stack.push(new ASTObject(Pyc_True));
+                } else if (operand == 10) {
+                    stack.push(new ASTObject(Pyc_False));
+                } else if (operand == 11) {
+                    stack.push(new ASTObject(new PycInt(-1)));
+                } else {
+                    PycRef<PycString> name = new PycString(PycObject::TYPE_STRING);
                     name->setValue("<LOAD_COMMON_CONSTANT>");
-                stack.push(new ASTName(name));
+                    stack.push(new ASTName(name));
+                }
             }
             break;
         case Pyc::STORE_LOCALS:
@@ -3063,6 +3362,15 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 };
                 PycRef<ASTNode> owner = stack.top();
                 stack.pop();
+                /* Python 3.14 lowers `with` to LOAD_SPECIAL(__enter__) /
+                   LOAD_SPECIAL(__exit__) instead of BEFORE_WITH.  The
+                   pre-pass has already validated its exception-table shape. */
+                auto withStart = withBodyEndByBefore.find(curpos);
+                if (withStart != withBodyEndByBefore.end()) {
+                    PycRef<ASTBlock> withblock = new ASTWithBlock(withStart->second);
+                    blocks.push(withblock);
+                    curblock = blocks.top();
+                }
                 PycRef<PycString> attr = new PycString(PycObject::TYPE_STRING);
                 if (operand >= 0 && operand < 4) {
                     attr->setValue(special_methods[operand]);
@@ -3758,12 +4066,15 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     PycRef<ASTNode> name = stack.top();
                     stack.pop();
                     PycRef<ASTNode> attr = new ASTBinary(name, new ASTName(code->getName(operand)), ASTBinary::BIN_ATTR);
+                    if (unpack == unpackStar)
+                        attr = new ASTUnary(attr, ASTUnary::UN_STAR);
 
                     PycRef<ASTNode> tup = stack.top();
                     if (tup.type() == ASTNode::NODE_TUPLE)
                         tup.cast<ASTTuple>()->add(attr);
-                    else
-                        /* Best-effort fallback for newer bytecode stack shapes. */
+                    else {
+                        cleanBuild = false;
+                    }
 
                     if (--unpack <= 0) {
                         stack.pop();
@@ -3793,12 +4104,15 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             {
                 if (unpack) {
                     PycRef<ASTNode> name = new ASTName(code->getCellVar(mod, operand));
+                    if (unpack == unpackStar)
+                        name = new ASTUnary(name, ASTUnary::UN_STAR);
 
                     PycRef<ASTNode> tup = stack.top();
                     if (tup.type() == ASTNode::NODE_TUPLE)
                         tup.cast<ASTTuple>()->add(name);
-                    else
-                        /* Best-effort fallback for newer bytecode stack shapes. */
+                    else {
+                        cleanBuild = false;
+                    }
 
                     if (--unpack <= 0) {
                         stack.pop();
@@ -3860,12 +4174,15 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         name = new ASTName(code->getName(operand));
                     else
                         name = new ASTName(code->getLocal(operand));
+                    if (unpack == unpackStar)
+                        name = new ASTUnary(name, ASTUnary::UN_STAR);
 
                     PycRef<ASTNode> tup = stack.top();
                     if (tup.type() == ASTNode::NODE_TUPLE)
                         tup.cast<ASTTuple>()->add(name);
-                    else
-                        /* Best-effort fallback for newer bytecode stack shapes. */
+                    else {
+                        cleanBuild = false;
+                    }
 
                     if (--unpack <= 0) {
                         stack.pop();
@@ -3925,7 +4242,18 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         curblock.cast<ASTIterBlock>()->setIndex(name);
                     } else if (curblock->blktype() == ASTBlock::BLK_WITH
                                    && !curblock->inited()) {
-                        curblock.cast<ASTWithBlock>()->setExpr(value);
+                        PycRef<ASTNode> expr = value;
+                        if (value.type() == ASTNode::NODE_CALL) {
+                            PycRef<ASTNode> func = value.cast<ASTCall>()->func();
+                            if (func.type() == ASTNode::NODE_BINARY
+                                    && func.cast<ASTBinary>()->op() == ASTBinary::BIN_ATTR
+                                    && func.cast<ASTBinary>()->right().type() == ASTNode::NODE_NAME
+                                    && func.cast<ASTBinary>()->right().cast<ASTName>()->name()
+                                            ->isEqual("__enter__")) {
+                                expr = func.cast<ASTBinary>()->left();
+                            }
+                        }
+                        curblock.cast<ASTWithBlock>()->setExpr(expr);
                         curblock.cast<ASTWithBlock>()->setVar(name);
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
@@ -3938,13 +4266,17 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::STORE_GLOBAL_A:
             {
                 PycRef<ASTNode> name = new ASTName(code->getName(operand));
+                PycRef<PycString> globalName = name.cast<ASTName>()->name();
 
                 if (unpack) {
+                    if (unpack == unpackStar)
+                        name = new ASTUnary(name, ASTUnary::UN_STAR);
                     PycRef<ASTNode> tup = stack.top();
                     if (tup.type() == ASTNode::NODE_TUPLE)
                         tup.cast<ASTTuple>()->add(name);
-                    else
-                        /* Best-effort fallback for newer bytecode stack shapes. */
+                    else {
+                        cleanBuild = false;
+                    }
 
                     if (--unpack <= 0) {
                         stack.pop();
@@ -3974,19 +4306,22 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 }
 
                 /* Mark the global as used */
-                code->markGlobal(name.cast<ASTName>()->name());
+                code->markGlobal(globalName);
             }
             break;
         case Pyc::STORE_NAME_A:
             {
                 if (unpack) {
                     PycRef<ASTNode> name = new ASTName(code->getName(operand));
+                    if (unpack == unpackStar)
+                        name = new ASTUnary(name, ASTUnary::UN_STAR);
 
                     PycRef<ASTNode> tup = stack.top();
                     if (tup.type() == ASTNode::NODE_TUPLE)
                         tup.cast<ASTTuple>()->add(name);
-                    else
-                        /* Best-effort fallback for newer bytecode stack shapes. */
+                    else {
+                        cleanBuild = false;
+                    }
 
                     if (--unpack <= 0) {
                         stack.pop();
@@ -4105,12 +4440,15 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     stack.pop();
 
                     PycRef<ASTNode> save = new ASTSubscr(dest, subscr);
+                    if (unpack == unpackStar)
+                        save = new ASTUnary(save, ASTUnary::UN_STAR);
 
                     PycRef<ASTNode> tup = stack.top();
                     if (tup.type() == ASTNode::NODE_TUPLE)
                         tup.cast<ASTTuple>()->add(save);
-                    else
-                        /* Best-effort fallback for newer bytecode stack shapes. */
+                    else {
+                        cleanBuild = false;
+                    }
 
                     if (--unpack <= 0) {
                         stack.pop();
@@ -4207,6 +4545,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::UNPACK_SEQUENCE_A:
             {
                 unpack = operand;
+                unpackStar = -1;
                 if (unpack > 0) {
                     ASTTuple::value_t vals;
                     stack.push(new ASTTuple(vals));
@@ -4228,6 +4567,16 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         stack.pop();
                     }
                 }
+            }
+            break;
+        case Pyc::UNPACK_EX_A:
+            {
+                int countBefore = operand & 0xFF;
+                int countAfter = (operand >> 8) & 0xFF;
+                unpack = countBefore + 1 + countAfter;
+                unpackStar = countAfter + 1;
+                ASTTuple::value_t vals;
+                stack.push(new ASTTuple(vals));
             }
             break;
         case Pyc::YIELD_FROM:
@@ -4275,6 +4624,28 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             /* Python 3.11+: swap TOS with the operand-th element from the top.
                A plain stack operation (used by chained comparisons, starred
                unpacking, etc.). */
+            if (mod->verCompare(3, 11) >= 0 && operand == 2
+                    && curblock->blktype() == ASTBlock::BLK_EXCEPT) {
+                /* Python 3.13 emits LOAD <return-value>; SWAP 2; POP_EXCEPT;
+                   RETURN_VALUE for a return from an except clause.  POP_EXCEPT
+                   removes interpreter exception state, not the Python return
+                   value; applying the raw swap to the AST stack instead makes
+                   an unrelated saved context become the returned expression. */
+                PycBuffer lookahead(code->code()->value(), code->code()->length());
+                int nextOp = 0, nextOperand = 0, nextPos = pos;
+                lookahead.setPos(source.pos());
+                bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
+                while (nextOp == Pyc::CACHE && !lookahead.atEof())
+                    bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
+                if (nextOp == Pyc::POP_EXCEPT) {
+                    bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
+                    while (nextOp == Pyc::CACHE && !lookahead.atEof())
+                        bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
+                    if (nextOp == Pyc::RETURN_VALUE
+                            || nextOp == Pyc::INSTRUMENTED_RETURN_VALUE_A)
+                        break;
+                }
+            }
             stack.swap(operand);
             break;
         case Pyc::BINARY_SLICE:
@@ -5155,7 +5526,35 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             pyc_output << ": ";
 
             inLambda = true;
-            print_src(code, mod, pyc_output);
+            /* A lambda compiled as `return x if cond else y` is represented
+               as an IF block containing a return followed by a return. A
+               lambda body cannot contain a statement-level `if`; render this
+               exact shape as the equivalent conditional expression. */
+            PycRef<ASTNodeList> lambdaSource = BuildFromCode(code_src, mod).try_cast<ASTNodeList>();
+            bool printedTernary = false;
+            if (lambdaSource != nullptr && lambdaSource->nodes().size() == 2) {
+                auto it = lambdaSource->nodes().begin();
+                PycRef<ASTCondBlock> ifBlock = (*it).try_cast<ASTCondBlock>();
+                ++it;
+                PycRef<ASTReturn> elseReturn = (*it).try_cast<ASTReturn>();
+                if (ifBlock != nullptr && ifBlock->blktype() == ASTBlock::BLK_IF
+                        && ifBlock->nodes().size() == 1 && elseReturn != nullptr) {
+                    PycRef<ASTReturn> ifReturn =
+                            ifBlock->nodes().front().try_cast<ASTReturn>();
+                    if (ifReturn != nullptr && ifBlock->cond() != nullptr) {
+                        print_src(ifReturn->value(), mod, pyc_output);
+                        pyc_output << " if ";
+                        if (ifBlock->negative())
+                            pyc_output << "not ";
+                        print_src(ifBlock->cond(), mod, pyc_output);
+                        pyc_output << " else ";
+                        print_src(elseReturn->value(), mod, pyc_output);
+                        printedTernary = true;
+                    }
+                }
+            }
+            if (!printedTernary)
+                print_src(code, mod, pyc_output);
             inLambda = false;
 
             pyc_output << ")";
@@ -5432,6 +5831,11 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
         break;
     case ASTNode::NODE_LOCALS:
         pyc_output << "locals()";
+        break;
+    case ASTNode::NODE_LOADBUILDCLASS:
+        /* This node normally folds into ASTClass before printing. Keep a
+           printable best-effort fallback for partially recovered classes. */
+        pyc_output << "__build_class__";
         break;
     case ASTNode::NODE_UNSUPPORTED:
         pyc_output << node.cast<ASTUnsupported>()->text();

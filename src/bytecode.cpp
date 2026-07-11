@@ -40,6 +40,7 @@ DECLARE_PYTHON(3, 11)
 DECLARE_PYTHON(3, 12)
 DECLARE_PYTHON(3, 13)
 DECLARE_PYTHON(3, 14)
+DECLARE_PYTHON(3, 15)
 
 const char* Pyc::OpcodeName(int opcode)
 {
@@ -111,6 +112,7 @@ int Pyc::ByteToOpcode(int maj, int min, int opcode)
         case 12: return python_3_12_map(opcode);
         case 13: return python_3_13_map(opcode);
         case 14: return python_3_14_map(opcode);
+        case 15: return python_3_15_map(opcode);
         }
         break;
     }
@@ -380,6 +382,7 @@ void bc_disasm(std::ostream& pyc_output, PycRef<PycCode> code, PycModule* mod,
 
     static const char *common_constants[] = {
         "AssertionError", "NotImplementedError", "tuple", "all", "any",
+        "list", "set", "None", "''", "True", "False", "-1",
     };
     static const size_t common_constants_len = sizeof(common_constants) / sizeof(common_constants[0]);
 

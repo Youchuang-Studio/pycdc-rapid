@@ -37,6 +37,7 @@ enum PycMagic {
     MAGIC_3_12 = 0x0A0D0DCB,
     MAGIC_3_13 = 0x0A0D0DF3,
     MAGIC_3_14 = 0x0A0D0E2B,
+    MAGIC_3_15 = 0x0A0D0E52,
 
     INVALID = 0,
 };
