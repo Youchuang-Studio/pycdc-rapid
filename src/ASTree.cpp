@@ -1489,6 +1489,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     for (const auto& val : rhs.cast<ASTMap>()->values()) {
                         target.cast<ASTMap>()->add(val.first, val.second);
                     }
+                } else if (target != nullptr && target.type() == ASTNode::NODE_MAP
+                        && rhs != nullptr) {
+                    /* Preserve a dynamic dictionary update as {**expr}. */
+                    target.cast<ASTMap>()->add(nullptr, rhs);
                 } else if (curblock != nullptr) {
                     cleanBuild = false;
                     curblock->append(new ASTUnsupported("# unsupported DICT_UPDATE/DICT_MERGE"));
