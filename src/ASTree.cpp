@@ -250,13 +250,6 @@ static PycRef<ASTCondBlock> ast_find_except_bind_block(PycRef<ASTBlock> curblock
     return nullptr;
 }
 
-static PycRef<ASTNode> ast_name_from_string(const char* name)
-{
-    PycRef<PycString> str = new PycString();
-    str->setValue(name);
-    return new ASTName(str);
-}
-
 /* compiler generates very, VERY similar byte code for if/else statement block and if-expression
  *  statement
  *      if a: b = 1
@@ -4955,101 +4948,6 @@ static void end_line(std::ostream& pyc_output)
 }
 
 int cur_indent = -1;
-static bool ast_is_empty_store(PycRef<ASTNode> node)
-{
-    if (node == nullptr || node.type() != ASTNode::NODE_STORE)
-        return false;
-
-    PycRef<ASTStore> store = node.cast<ASTStore>();
-    return store->src() == nullptr && store->dest() == nullptr;
-}
-
-static bool ast_references_name(PycRef<ASTNode> node, const char* name)
-{
-    if (node == nullptr)
-        return false;
-
-    switch (node->type()) {
-    case ASTNode::NODE_NAME:
-        return node.cast<ASTName>()->name()->isEqual(name);
-    case ASTNode::NODE_BLOCK:
-        for (const auto& child : node.cast<ASTBlock>()->nodes()) {
-            if (ast_references_name(child, name))
-                return true;
-        }
-        return false;
-    case ASTNode::NODE_STORE:
-        return ast_references_name(node.cast<ASTStore>()->src(), name)
-               || ast_references_name(node.cast<ASTStore>()->dest(), name);
-    case ASTNode::NODE_DELETE:
-        return ast_references_name(node.cast<ASTDelete>()->value(), name);
-    case ASTNode::NODE_BINARY:
-    case ASTNode::NODE_COMPARE:
-    case ASTNode::NODE_SLICE:
-        return ast_references_name(node.cast<ASTBinary>()->left(), name)
-               || ast_references_name(node.cast<ASTBinary>()->right(), name);
-    case ASTNode::NODE_UNARY:
-        return ast_references_name(node.cast<ASTUnary>()->operand(), name);
-    case ASTNode::NODE_CALL:
-        {
-            PycRef<ASTCall> call = node.cast<ASTCall>();
-            if (ast_references_name(call->func(), name)
-                    || ast_references_name(call->var(), name)
-                    || ast_references_name(call->kw(), name)) {
-                return true;
-            }
-            for (const auto& param : call->pparams()) {
-                if (ast_references_name(param, name))
-                    return true;
-            }
-            for (const auto& param : call->kwparams()) {
-                if (ast_references_name(param.first, name)
-                        || ast_references_name(param.second, name)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-    case ASTNode::NODE_TUPLE:
-        for (const auto& val : node.cast<ASTTuple>()->values()) {
-            if (ast_references_name(val, name))
-                return true;
-        }
-        return false;
-    case ASTNode::NODE_LIST:
-        for (const auto& val : node.cast<ASTList>()->values()) {
-            if (ast_references_name(val, name))
-                return true;
-        }
-        return false;
-    case ASTNode::NODE_JOINEDSTR:
-        for (const auto& val : node.cast<ASTJoinedStr>()->values()) {
-            if (ast_references_name(val, name))
-                return true;
-        }
-        return false;
-    case ASTNode::NODE_FORMATTEDVALUE:
-        return ast_references_name(node.cast<ASTFormattedValue>()->val(), name)
-               || ast_references_name(node.cast<ASTFormattedValue>()->format_spec(), name);
-    default:
-        return false;
-    }
-}
-
-static bool ast_block_references_name_after_first(PycRef<ASTBlock> blk, const char* name)
-{
-    bool first = true;
-    for (const auto& node : blk->nodes()) {
-        if (first) {
-            first = false;
-            continue;
-        }
-        if (ast_references_name(node, name))
-            return true;
-    }
-    return false;
-}
-
 static void print_block(PycRef<ASTBlock> blk, PycModule* mod,
                         std::ostream& pyc_output, bool skip_first = false)
 {
