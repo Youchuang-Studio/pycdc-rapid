@@ -2129,6 +2129,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     PycRef<ASTNode> import = stack.top();
                     stack.pop();
                     curblock->append(new ASTStore(import, NULL));
+                } else if (operand == 3) {
+                    /* INTRINSIC_STOPITERATION_ERROR wraps a generator's return
+                       path at runtime; it has no source-level representation. */
                 } else {
                     PycRef<ASTNode> arg = stack.top();
                     stack.pop();
@@ -2517,7 +2520,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         bool is_jump_to_start =
                                 target == curblock.cast<ASTIterBlock>()->start();
                         bool at_loop_end = (curblock->end() != 0)
-                                     && (pos == curblock->end());
+                                && (pos == curblock->end()
+                                    || (mod->verCompare(3, 12) >= 0
+                                        && pos + static_cast<int>(sizeof(uint16_t))
+                                                == curblock->end()));
                         bool should_pop_for_block = curblock.cast<ASTIterBlock>()->isComprehension();
                         // in v3.8, SETUP_LOOP is deprecated and for blocks aren't terminated by POP_BLOCK, so we add them here
                         bool should_add_for_block = mod->majorVer() == 3 && mod->minorVer() >= 8
@@ -3290,11 +3296,16 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             break;
         case Pyc::END_FOR:
             {
-                stack.pop();
+                /* A preceding 3.12+ loop back-edge may already have consumed
+                   the iterator state. Keep malformed or partially recovered
+                   exception-table regions from underflowing the AST stack. */
+                if (!stack.empty())
+                    stack.pop();
 
                 if ((opcode == Pyc::END_FOR) && (mod->majorVer() == 3) && (mod->minorVer() == 12)) {
                     // one additional pop for python 3.12
-                    stack.pop();
+                    if (!stack.empty())
+                        stack.pop();
                 }
 
                 // end for loop here
@@ -3314,9 +3325,24 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
                 }
                 else {
-                    if (mod->verCompare(3, 14) < 0)
-                        fprintf(stderr, "Wrong block type %i for END_FOR\n", curblock->blktype());
-                    cleanBuild = false;
+                    bool for_still_open = false;
+                    std::stack<PycRef<ASTBlock> > pending = blocks;
+                    while (!pending.empty()) {
+                        if (pending.top()->blktype() == ASTBlock::BLK_FOR) {
+                            for_still_open = true;
+                            break;
+                        }
+                        pending.pop();
+                    }
+
+                    /* Python 3.12+ places END_FOR after the loop back-edge.
+                       A correctly reconstructed loop has already been closed
+                       there, so END_FOR only completes bytecode stack cleanup. */
+                    if (for_still_open) {
+                        fprintf(stderr, "Wrong block type %i for END_FOR\n",
+                                curblock->blktype());
+                        cleanBuild = false;
+                    }
                 }
             }
             break;
@@ -4187,6 +4213,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             }
             break;
         case Pyc::YIELD_VALUE:
+        case Pyc::YIELD_VALUE_A:
         case Pyc::INSTRUMENTED_YIELD_VALUE_A:
             {
                 PycRef<ASTNode> value = stack.top();
