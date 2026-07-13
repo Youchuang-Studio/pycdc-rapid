@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.12)
 project(pycdc)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -66,6 +68,12 @@ add_library(pycxx STATIC
     src/bytes/python_3_15.cpp
 )
 
+if(BUILD_TESTING)
+    add_executable(pycdc_core_tests tests/test_core.cpp)
+    target_link_libraries(pycdc_core_tests pycxx)
+    add_test(NAME pycdc_core_tests COMMAND pycdc_core_tests)
+endif()
+
 add_executable(pycdas src/pycdas.cpp)
 target_link_libraries(pycdas pycxx)
 
@@ -83,6 +91,12 @@ install(TARGETS pycdc
 
 find_package(Python3 3.6 COMPONENTS Interpreter)
 if(Python3_FOUND)
+    if(BUILD_TESTING)
+        add_test(NAME pycdc_runner_status_tests
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_run_tests.py")
+        set_tests_properties(pycdc_runner_status_tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    endif()
     add_custom_target(check
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.py"
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:pycdc>")

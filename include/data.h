@@ -47,14 +47,20 @@ public:
     ~PycBuffer() { }
 
     bool isOpen() const override { return (m_buffer != 0); }
-    bool atEof() const override { return (m_pos >= m_size); }
+    bool atEof() const override { return (m_pos < 0 || m_pos >= m_size); }
 
     int getByte() override;
     void getBuffer(int bytes, void* buffer) override;
 
     /* Save/restore read position so callers can peek the next instruction. */
     int pos() const { return m_pos; }
-    void setPos(int p) { m_pos = p; }
+    bool setPos(int p)
+    {
+        if (p < 0 || p > m_size)
+            return false;
+        m_pos = p;
+        return true;
+    }
 
 private:
     const unsigned char* m_buffer;

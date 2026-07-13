@@ -76,7 +76,7 @@ def run_test(test_file):
     errlines = []
     fails = 0
     xfails = 0
-    upass = 0
+    xpasses = 0
     for xpass_file in compiled_files:
         ok, errs = decompyle_one(test_name, xpass_file, outdir, tokenized_expect)
         if not ok:
@@ -88,25 +88,30 @@ def run_test(test_file):
         if not ok:
             xfails += 1
         else:
-            upass += 1
+            xpasses += 1
 
-    if fails == 0:
+    if fails == 0 and xpasses == 0:
         if xfails != 0:
             if not compiled_files:
                 status_line += '\033[33mXFAIL ({})\033[0m\n'.format(xfails)
             else:
-                status_line += '\033[32mPASS ({})\033[33m + XFAIL ()\033[0m\n' \
+                status_line += '\033[32mPASS ({})\033[33m + XFAIL ({})\033[0m\n' \
                                .format(len(compiled_files), xfails)
         else:
             status_line += '\033[32mPASS ({})\033[0m\n'.format(len(compiled_files))
     else:
+        status = []
+        if fails != 0:
+            status.append('\033[31mFAIL ({} of {})\033[0m'.format(fails, len(compiled_files)))
+        elif compiled_files:
+            status.append('\033[32mPASS ({})\033[0m'.format(len(compiled_files)))
         if xfails != 0:
-            status_line += '\033[31mFAIL ({} of {})\033[33m + XFAIL ({})\033[0m\n' \
-                           .format(fails, len(compiled_files), xfails)
-        else:
-            status_line += '\033[31mFAIL ({} of {})\033[0m\n'.format(fails, len(compiled_files))
+            status.append('\033[33mXFAIL ({})\033[0m'.format(xfails))
+        if xpasses != 0:
+            status.append('\033[31mXPASS ({})\033[0m'.format(xpasses))
+        status_line += ' + '.join(status) + '\n'
 
-    return fails, [status_line] + errlines
+    return fails + xpasses, [status_line] + errlines
 
 
 def main():

@@ -57,12 +57,14 @@ public:
     }
 
     /* Swap the top of stack with the i-th element from the top (i >= 2). */
-    void swap(int i)
+    bool swap(int i)
     {
         int a = m_ptr;
         int b = m_ptr + 1 - i;
-        if (a >= 0 && b >= 0 && a != b)
-            std::swap(m_stack[a], m_stack[b]);
+        if (i < 2 || a < 0 || b < 0 || a == b)
+            return false;
+        std::swap(m_stack[a], m_stack[b]);
+        return true;
     }
 
     bool empty() const

@@ -85,7 +85,7 @@ int PycBuffer::getByte()
 
 void PycBuffer::getBuffer(int bytes, void* buffer)
 {
-    if (m_pos + bytes > m_size) {
+    if (bytes < 0 || m_pos < 0 || m_pos > m_size || bytes > m_size - m_pos) {
         fputs("PycBuffer::getBuffer(): Unexpected end of stream\n", stderr);
         std::exit(1);
     }

@@ -2669,16 +2669,19 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     int except_end = offs;
                     PycBuffer target_source(code->code()->value(), code->code()->length());
                     int target_opcode = 0, target_operand = 0, target_pos = offs;
-                    target_source.setPos(offs);
-                    bc_next(target_source, mod, target_opcode, target_operand, target_pos);
-                    if (target_opcode == Pyc::RETURN_VALUE
-                            || target_opcode == Pyc::RETURN_CONST_A
-                            || target_opcode == Pyc::INSTRUMENTED_RETURN_VALUE_A
-                            || target_opcode == Pyc::INSTRUMENTED_RETURN_CONST_A) {
-                        /* Python 3.13 can dispatch a failed exception match to
-                           a return that terminates the current clause.
-                           Keep that return inside the except block. */
-                        except_end = target_pos;
+                    if (target_source.setPos(offs)) {
+                        bc_next(target_source, mod, target_opcode, target_operand, target_pos);
+                        if (target_opcode == Pyc::RETURN_VALUE
+                                || target_opcode == Pyc::RETURN_CONST_A
+                                || target_opcode == Pyc::INSTRUMENTED_RETURN_VALUE_A
+                                || target_opcode == Pyc::INSTRUMENTED_RETURN_CONST_A) {
+                            /* Python 3.13 can dispatch a failed exception match to
+                               a return that terminates the current clause.
+                               Keep that return inside the except block. */
+                            except_end = target_pos;
+                        }
+                    } else {
+                        cleanBuild = false;
                     }
                     if (curblock->blktype() == ASTBlock::BLK_EXCEPT
                             && curblock.cast<ASTCondBlock>()->cond() == NULL) {
@@ -3908,7 +3911,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                                        || pkOp == Pyc::JUMP_BACKWARD_A
                                        || pkOp == Pyc::JUMP_BACKWARD_NO_INTERRUPT_A);
                         if (keepNext) {
-                            source.setPos(savedSrc);
+                            if (!source.setPos(savedSrc))
+                                cleanBuild = false;
                             pos = savedPos;
                         } else {
                             opcode = pkOp;
@@ -4693,20 +4697,26 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                    an unrelated saved context become the returned expression. */
                 PycBuffer lookahead(code->code()->value(), code->code()->length());
                 int nextOp = 0, nextOperand = 0, nextPos = pos;
-                lookahead.setPos(source.pos());
-                bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
-                while (nextOp == Pyc::CACHE && !lookahead.atEof())
-                    bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
-                if (nextOp == Pyc::POP_EXCEPT) {
+                if (lookahead.setPos(source.pos())) {
                     bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
                     while (nextOp == Pyc::CACHE && !lookahead.atEof())
                         bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
-                    if (nextOp == Pyc::RETURN_VALUE
-                            || nextOp == Pyc::INSTRUMENTED_RETURN_VALUE_A)
-                        break;
+                    if (nextOp == Pyc::POP_EXCEPT) {
+                        bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
+                        while (nextOp == Pyc::CACHE && !lookahead.atEof())
+                            bc_next(lookahead, mod, nextOp, nextOperand, nextPos);
+                        if (nextOp == Pyc::RETURN_VALUE
+                                || nextOp == Pyc::INSTRUMENTED_RETURN_VALUE_A)
+                            break;
+                    }
+                } else {
+                    cleanBuild = false;
                 }
             }
-            stack.swap(operand);
+            if (!stack.swap(operand)) {
+                fprintf(stderr, "Warning: invalid SWAP operand %d at offset %d\n", operand, pos);
+                cleanBuild = false;
+            }
             break;
         case Pyc::BINARY_SLICE:
             {
