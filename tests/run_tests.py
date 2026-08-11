@@ -8,6 +8,11 @@ import argparse
 import subprocess
 import multiprocessing
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
+
 TEST_DIR = os.path.dirname(os.path.realpath(__file__))
 SCRIPTS_DIR = os.path.realpath(os.path.join(TEST_DIR, '..', 'scripts'))
 
@@ -19,22 +24,24 @@ def decompyle_one(test_name, pyc_file, outdir, tokenized_expect):
             encoding='utf-8', errors='replace')
     pycdc_output = proc.stdout
     if proc.returncode != 0 or pycdc_output:
-        with open(out_base + '.err', 'w') as errfile:
+        with open(out_base + '.err', 'w', encoding='utf-8', errors='replace') as errfile:
             errfile.write(pycdc_output)
         return False, [pycdc_output]
     elif os.path.exists(out_base + '.err'):
         os.unlink(out_base + '.err')
 
+    token_env = os.environ.copy()
+    token_env['PYTHONIOENCODING'] = 'utf-8'
     proc = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS_DIR, 'token_dump'), out_base + '.src.py'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-            encoding='utf-8', errors='replace')
+            encoding='utf-8', errors='replace', env=token_env)
     tokenized = proc.stdout
     token_dump_err = proc.stderr
-    with open(out_base + '.tok.txt', 'w') as tokfile:
+    with open(out_base + '.tok.txt', 'w', encoding='utf-8', errors='replace') as tokfile:
         tokfile.write(tokenized)
     if proc.returncode != 0 or token_dump_err:
-        with open(out_base + '.tok.err', 'w') as errfile:
+        with open(out_base + '.tok.err', 'w', encoding='utf-8', errors='replace') as errfile:
             errfile.write(token_dump_err)
         return False, [token_dump_err]
     elif os.path.exists(out_base + '.tok.err'):
@@ -46,7 +53,7 @@ def decompyle_one(test_name, pyc_file, outdir, tokenized_expect):
         diff = difflib.unified_diff(tokenized_expect.splitlines(True), tokenized.splitlines(True),
                                     fromfile=fromfile, tofile=tofile)
         diff = list(diff)
-        with open(out_base + '.tok.diff', 'w') as diff_file:
+        with open(out_base + '.tok.diff', 'w', encoding='utf-8', errors='replace') as diff_file:
             diff_file.writelines(diff)
         return False, ['Tokenized output does not match expected output:\n'] + diff
 
