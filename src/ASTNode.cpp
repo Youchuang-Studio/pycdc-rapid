@@ -197,6 +197,21 @@ void ASTBlock::removeFirst()
     m_nodes.erase(m_nodes.begin());
 }
 
+void ASTBlock::pruneUnreachableAfterReturn()
+{
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        if ((*it).type() == ASTNode::NODE_BLOCK)
+            (*it).cast<ASTBlock>()->pruneUnreachableAfterReturn();
+        if ((*it).type() != ASTNode::NODE_RETURN
+                || (*it).cast<ASTReturn>()->rettype() != ASTReturn::RETURN)
+            continue;
+        auto eraseFrom = it;
+        ++eraseFrom;
+        m_nodes.erase(eraseFrom, m_nodes.end());
+        break;
+    }
+}
+
 const char* ASTBlock::type_str() const
 {
     static const char* s_type_strings[] = {

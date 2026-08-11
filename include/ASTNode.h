@@ -576,6 +576,7 @@ public:
     list_t::size_type size() const { return m_nodes.size(); }
     void removeFirst();
     void removeLast();
+    void pruneUnreachableAfterReturn();
     void append(PycRef<ASTNode> node) { m_nodes.emplace_back(std::move(node)); }
     const char* type_str() const;
 

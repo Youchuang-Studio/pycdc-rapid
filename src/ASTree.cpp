@@ -284,9 +284,17 @@ static void CheckIfExpr(FastStack& stack, PycRef<ASTBlock> curblock)
     if ((*rit)->type() != ASTNode::NODE_BLOCK ||
         (*rit).cast<ASTBlock>()->blktype() != ASTBlock::BLK_ELSE)
         return;
+    PycRef<ASTBlock> else_block = (*rit).cast<ASTBlock>();
     ++rit;
     if ((*rit)->type() != ASTNode::NODE_BLOCK ||
         (*rit).cast<ASTBlock>()->blktype() != ASTBlock::BLK_IF)
+        return;
+    PycRef<ASTBlock> if_block_node = (*rit).cast<ASTBlock>();
+    /* A conditional expression leaves its branch values on the value stack
+       and therefore has empty statement blocks.  A surrounding for/with can
+       also leave an unrelated value on the stack; do not consume that value
+       and erase a real statement if/else. */
+    if (if_block_node->size() != 0 || else_block->size() != 0)
         return;
     auto else_expr = StackPopTop(stack);
     curblock->removeLast();
@@ -860,9 +868,9 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
         order.push_back(p);
         opAt[p] = opcode; operAt[p] = operand; nextAt[p] = pos;
     }
-    std::map<int,int> instrEndingAt;   /* nextpos -> pos */
+    std::map<int,int> instrEndingAt;   /* physical nextpos -> pos */
     for (int p : order)
-        instrEndingAt[nextAt[p]] = p;
+        instrEndingAt[ast_next_instr_offset_after_caches(mod, opAt[p], nextAt[p])] = p;
 
     auto isCondBack = [](int op){
         return op == Pyc::POP_JUMP_BACKWARD_IF_TRUE_A
@@ -871,15 +879,23 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
             || op == Pyc::POP_JUMP_BACKWARD_IF_NOT_NONE_A;
     };
     auto isFwdGuard = [](int op){
-        return op == Pyc::POP_JUMP_FORWARD_IF_FALSE_A
+        return op == Pyc::POP_JUMP_IF_FALSE_A
+            || op == Pyc::POP_JUMP_IF_TRUE_A
+            || op == Pyc::POP_JUMP_IF_NONE_A
+            || op == Pyc::POP_JUMP_IF_NOT_NONE_A
+            || op == Pyc::POP_JUMP_FORWARD_IF_FALSE_A
             || op == Pyc::POP_JUMP_FORWARD_IF_TRUE_A
             || op == Pyc::POP_JUMP_FORWARD_IF_NONE_A
-            || op == Pyc::POP_JUMP_FORWARD_IF_NOT_NONE_A;
+            || op == Pyc::POP_JUMP_FORWARD_IF_NOT_NONE_A
+            || op == Pyc::INSTRUMENTED_POP_JUMP_IF_FALSE_A
+            || op == Pyc::INSTRUMENTED_POP_JUMP_IF_TRUE_A
+            || op == Pyc::INSTRUMENTED_POP_JUMP_IF_NONE_A
+            || op == Pyc::INSTRUMENTED_POP_JUMP_IF_NOT_NONE_A;
     };
     for (int b : order) {
         if (!isCondBack(opAt[b]))
             continue;
-        int end = nextAt[b];
+        int end = ast_next_instr_offset_after_caches(mod, opAt[b], nextAt[b]);
         int loop_start = end - operAt[b] * 2;   /* backward target */
         if (loop_start < 0 || loop_start >= b)
             continue;
@@ -889,11 +905,46 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
         int guard = git->second;
         if (!isFwdGuard(opAt[guard]))
             continue;
-        int guard_target = nextAt[guard] + operAt[guard] * 2;
+        int guard_target = ast_next_instr_offset_after_caches(
+                mod, opAt[guard], nextAt[guard]) + operAt[guard] * 2;
         if (guard_target != end)            /* guard must skip to loop end */
             continue;
         whileGuardEnd[guard] = end;
         whileBackedges.insert(b);
+    }
+
+    /* Python 3.14 commonly emits a top-tested while as a forward conditional
+       guard plus unconditional JUMP_BACKWARD edges.  The physical final edge
+       closes the loop; earlier edges remain continues (including a continue
+       immediately before a terminal return). */
+    if (mod->verCompare(3, 14) >= 0) {
+        for (int b : order) {
+            if (opAt[b] != Pyc::JUMP_BACKWARD_A
+                    && opAt[b] != Pyc::JUMP_BACKWARD_NO_INTERRUPT_A
+                    && opAt[b] != Pyc::INSTRUMENTED_JUMP_BACKWARD_A)
+                continue;
+            int end = ast_next_instr_offset_after_caches(mod, opAt[b], nextAt[b]);
+            int loop_start = end - operAt[b] * 2;
+            if (loop_start < 0 || loop_start >= b)
+                continue;
+
+            for (int guard : order) {
+                if (guard < loop_start)
+                    continue;
+                if (guard >= b || guard > loop_start + 64)
+                    break;
+                if (!isFwdGuard(opAt[guard]))
+                    continue;
+                int guard_target = ast_next_instr_offset_after_caches(
+                        mod, opAt[guard], nextAt[guard]) + operAt[guard] * 2;
+                if (guard_target < end || guard_target <= b)
+                    continue;
+                whileGuardEnd[guard] = guard_target;
+                if (guard_target == end)
+                    whileBackedges.insert(b);
+                break;
+            }
+        }
     }
 }
 
@@ -944,6 +995,9 @@ static void ScanChainedCompare(PycRef<PycCode> code, PycModule* mod,
 
 PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 {
+    const bool py314ClassBody = mod->verCompare(3, 14) >= 0
+            && (code->flags() & PycCode::CO_NEWLOCALS) == 0
+            && code->name()->strValue() != "<module>";
     cleanBuild = true;
     PycBuffer source(code->code()->value(), code->code()->length());
     const bool isModuleCode = code->name() != nullptr
@@ -2092,6 +2146,11 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 stack.pop();
                 PycRef<ASTNode> loadbuild = stack.top();
                 stack.pop();
+                if (mod->verCompare(3, 14) >= 0 && loadbuild == nullptr
+                        && !stack.empty()) {
+                    loadbuild = stack.top();
+                    stack.pop();
+                }
                 int loadbuild_type = loadbuild.type();
                 if (loadbuild_type == ASTNode::NODE_LOADBUILDCLASS) {
                     /* Python 3.11 pushes a NULL before LOAD_BUILD_CLASS; drop it
@@ -3032,10 +3091,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 
                 if (opcode == Pyc::POP_JUMP_IF_NONE_A
                         || opcode == Pyc::INSTRUMENTED_POP_JUMP_IF_NONE_A) {
-                    cond = new ASTCompare(cond, new ASTObject(Pyc_None), ASTCompare::CMP_IS);
+                    cond = new ASTCompare(cond, new ASTObject(Pyc_None),
+                            mod->verCompare(3, 14) >= 0
+                            ? ASTCompare::CMP_IS_NOT : ASTCompare::CMP_IS);
                 } else if (opcode == Pyc::POP_JUMP_IF_NOT_NONE_A
                         || opcode == Pyc::INSTRUMENTED_POP_JUMP_IF_NOT_NONE_A) {
-                    cond = new ASTCompare(cond, new ASTObject(Pyc_None), ASTCompare::CMP_IS_NOT);
+                    cond = new ASTCompare(cond, new ASTObject(Pyc_None),
+                            mod->verCompare(3, 14) >= 0
+                            ? ASTCompare::CMP_IS : ASTCompare::CMP_IS_NOT);
                 }
 
                 /* Store the current stack for the else statement(s) */
@@ -3335,6 +3398,24 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     offs = ast_relative_jump_target(mod, opcode, operand, pos, true);
                 } else if (mod->verCompare(3, 10) >= 0) {
                     offs *= sizeof(uint16_t); // // BPO-27129
+                }
+
+                if (whileBackedges.count(curpos)) {
+                    while (blocks.size() > 1
+                            && curblock->blktype() != ASTBlock::BLK_WHILE) {
+                        PycRef<ASTBlock> inner = curblock;
+                        blocks.pop();
+                        curblock = blocks.top();
+                        curblock->append(inner.cast<ASTNode>());
+                    }
+                    if (curblock->blktype() == ASTBlock::BLK_WHILE
+                            && blocks.size() > 1) {
+                        PycRef<ASTBlock> wh = curblock;
+                        blocks.pop();
+                        curblock = blocks.top();
+                        curblock->append(wh.cast<ASTNode>());
+                    }
+                    break;
                 }
 
                 if (offs < pos) {
@@ -4720,7 +4801,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 } else {
                     PycRef<ASTNode> value = stack.top();
                     stack.pop();
-                    PycRef<ASTNode> name = new ASTName(code->getCellVar(mod, operand));
+                    PycRef<PycString> cellName = code->getCellVar(mod, operand);
+                    if (py314ClassBody && cellName->strValue() == "__classdict__")
+                        break;
+                    PycRef<ASTNode> name = new ASTName(cellName);
 
                     if (py311_except_bind_pending && mod->verCompare(3, 11) >= 0) {
                         PycRef<ASTCondBlock> except = ast_find_except_bind_block(curblock, blocks);
@@ -4989,6 +5073,15 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     if (varname->length() >= 2 && varname->value()[0] == '_'
                             && varname->value()[1] == '[') {
                         /* Don't show stores of list comp append objects. */
+                        break;
+                    }
+                    if (py314ClassBody
+                            && (varname->strValue() == "__firstlineno__"
+                                || varname->strValue() == "__classdict__"
+                                || varname->strValue() == "__static_attributes__"
+                                || varname->strValue() == "__classdictcell__")) {
+                        /* Python 3.14 class-body bookkeeping is regenerated by
+                           the compiler and is not part of the source class. */
                         break;
                     }
 
@@ -5414,6 +5507,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         }
     }
 
+    if (mod->verCompare(3, 14) >= 0)
+        defblock->pruneUnreachableAfterReturn();
     return new ASTNodeList(defblock->nodes());
 }
 

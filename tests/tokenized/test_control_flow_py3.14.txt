@@ -1,0 +1,79 @@
+class ControlWindow : <EOL>
+<INDENT>
+def __init__ ( self , metadata ) : <EOL>
+<INDENT>
+self . metadata = metadata or { } <EOL>
+self . build ( ) <EOL>
+<OUTDENT>
+def build ( self ) : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+<OUTDENT>
+def choose_duration ( use_days ) : <EOL>
+<INDENT>
+if use_days : <EOL>
+<INDENT>
+value = 1 <EOL>
+unit = 2 <EOL>
+return ( value , unit ) <EOL>
+<OUTDENT>
+value = 3 <EOL>
+unit = 4 <EOL>
+return ( value , unit ) <EOL>
+<OUTDENT>
+def retry_password ( read_password , verify_password , limit ) : <EOL>
+<INDENT>
+password_ok = False <EOL>
+failed = 0 <EOL>
+while not password_ok : <EOL>
+<INDENT>
+password = read_password ( ) <EOL>
+if password is None : <EOL>
+<INDENT>
+return None <EOL>
+<OUTDENT>
+if verify_password ( password ) : <EOL>
+<INDENT>
+password_ok = True <EOL>
+continue <EOL>
+<OUTDENT>
+failed += 1 <EOL>
+if failed < limit : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+return False <EOL>
+<OUTDENT>
+return True <EOL>
+<OUTDENT>
+def monitor ( clock , sleep , poll , deadline , expire ) : <EOL>
+<INDENT>
+while clock ( ) < deadline : <EOL>
+<INDENT>
+sleep ( 2 ) <EOL>
+if poll ( ) is None : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+return None <EOL>
+<OUTDENT>
+expire ( ) <EOL>
+<OUTDENT>
+def refresh ( metadata , now ) : <EOL>
+<INDENT>
+'refresh expiry and trial' <EOL>
+expiry = metadata . get ( 'expiry' ) <EOL>
+if expiry : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+expired = now > int ( expiry ) <EOL>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+expired = False <EOL>
+<OUTDENT>
+<OUTDENT>
+trial = metadata . get ( 'trial' ) <EOL>
+return trial <EOL>
