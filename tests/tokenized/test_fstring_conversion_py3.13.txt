@@ -1,0 +1,6 @@
+def format_values ( value , other ) : <EOL>
+<INDENT>
+decimal = f'{value:.2f}' <EOL>
+representation = f'{value!r}' <EOL>
+combined = f'{value} and {other}' <EOL>
+return ( decimal , representation , combined ) <EOL>

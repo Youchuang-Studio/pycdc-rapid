@@ -1,0 +1,9 @@
+def increment_and_reset ( value ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+return value + 1 <EOL>
+<OUTDENT>
+finally : <EOL>
+<INDENT>
+value = 0 <EOL>

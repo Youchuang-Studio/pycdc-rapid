@@ -1,0 +1,11 @@
+def boolean_cases ( a , b , c ) : <EOL>
+<INDENT>
+if a or b and c : <EOL>
+<INDENT>
+return 1 <EOL>
+<OUTDENT>
+if a and not b : <EOL>
+<INDENT>
+return 2 <EOL>
+<OUTDENT>
+return 3 <EOL>

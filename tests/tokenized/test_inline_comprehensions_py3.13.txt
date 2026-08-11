@@ -1,0 +1,11 @@
+def double_values ( data ) : <EOL>
+<INDENT>
+return [ value * 2 for value in data ] <EOL>
+<OUTDENT>
+def positive_values ( data ) : <EOL>
+<INDENT>
+return [ value for value in data if value > 0 ] <EOL>
+<OUTDENT>
+def indexed_values ( matrix ) : <EOL>
+<INDENT>
+return { ( row_index , column_index ) : value for row_index , row in enumerate ( matrix ) for column_index , value in enumerate ( row ) } <EOL>

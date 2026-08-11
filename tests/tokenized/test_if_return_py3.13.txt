@@ -1,0 +1,7 @@
+def absolute_value ( value ) : <EOL>
+<INDENT>
+if value > 0 : <EOL>
+<INDENT>
+return value <EOL>
+<OUTDENT>
+return - value <EOL>

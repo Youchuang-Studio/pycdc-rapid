@@ -402,6 +402,7 @@ public:
         : ASTNode(NODE_SET), m_values(std::move(values)) { }
 
     const value_t& values() const { return m_values; }
+    void add(PycRef<ASTNode> value) { m_values.emplace_back(std::move(value)); }
 
 private:
     value_t m_values;
@@ -608,12 +609,15 @@ public:
     PycRef<ASTNode> cond() const { return m_cond; }
     PycRef<ASTNode> exceptVar() const { return m_except_var; }
     bool negative() const { return m_negative; }
+    int shortCircuitOrTarget() const { return m_short_circuit_or_target; }
     void setExceptVar(PycRef<ASTNode> except_var) { m_except_var = std::move(except_var); }
+    void setShortCircuitOrTarget(int target) { m_short_circuit_or_target = target; }
 
 private:
     PycRef<ASTNode> m_cond;
     PycRef<ASTNode> m_except_var;
     bool m_negative;
+    int m_short_circuit_or_target = -1;
 };
 
 
