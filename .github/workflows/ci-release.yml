@@ -1,0 +1,209 @@
+name: CI and Release
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_title:
+        description: Release title
+        required: true
+        type: string
+      prerelease:
+        description: Mark as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  validate:
+    name: Validate trigger
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require master for a release
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "Manual releases must run from the master branch." >&2
+            exit 1
+          fi
+
+  linux:
+    name: Linux x86_64
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Debug
+        run: |
+          cmake -S . -B build-debug \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"
+
+      - name: Configure Release
+        run: |
+          cmake -S . -B build-release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"
+
+      - name: Build
+        run: |
+          cmake --build build-debug --parallel "$(nproc)"
+          cmake --build build-release --parallel "$(nproc)"
+
+      - name: Test
+        run: |
+          cmake --build build-debug --target check
+          cmake --build build-release --target check
+          ctest --test-dir build-debug --output-on-failure
+          ctest --test-dir build-release --output-on-failure
+
+      - name: Package
+        shell: bash
+        run: |
+          package_name="pycdc-rapid-linux-x86_64"
+          package_dir="dist/$package_name"
+
+          mkdir -p "$package_dir"
+          cp build-release/pycdc build-release/pycdas README.markdown LICENSE "$package_dir/"
+
+          cd "$package_dir"
+          cmake -E tar cf "../$package_name.zip" --format=zip \
+            pycdc pycdas README.markdown LICENSE
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-package
+          path: dist/pycdc-rapid-linux-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows x86_64 (${{ matrix.runtime }})
+    needs: validate
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [dynamic, static]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $arguments = @(
+            "-S", ".",
+            "-B", "build-release",
+            "-G", "Visual Studio 17 2022",
+            "-A", "x64"
+          )
+
+          if ("${{ matrix.runtime }}" -eq "static") {
+            $arguments += "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW"
+            $arguments += '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
+          }
+
+          cmake @arguments
+
+      - name: Build
+        run: |
+          cmake --build build-release --config Debug --parallel 4
+          cmake --build build-release --config Release --parallel 4
+
+      - name: Test
+        run: |
+          cmake --build build-release --config Debug --target check
+          cmake --build build-release --config Release --target check
+          ctest --test-dir build-release -C Debug --output-on-failure
+          ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $packageName = "pycdc-rapid-windows-x86_64-${{ matrix.runtime }}"
+          $packageDir = "dist/$packageName"
+
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "build-release/Release/pycdc.exe" $packageDir
+          Copy-Item "build-release/Release/pycdas.exe" $packageDir
+          Copy-Item "README.markdown" $packageDir
+          Copy-Item "LICENSE" $packageDir
+          Compress-Archive -Path "$packageDir/*" -DestinationPath "dist/$packageName.zip"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.runtime }}-package
+          path: dist/pycdc-rapid-windows-x86_64-${{ matrix.runtime }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish Release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum \
+            pycdc-rapid-linux-x86_64.zip \
+            pycdc-rapid-windows-x86_64-dynamic.zip \
+            pycdc-rapid-windows-x86_64-static.zip \
+            > SHA256SUMS.txt
+
+      - name: Publish Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE: ${{ inputs.release_title }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          release_tag="${GITHUB_SHA::7}"
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $release_tag already exists." >&2
+            exit 1
+          fi
+
+          arguments=(
+            "$release_tag"
+            "dist/SHA256SUMS.txt"
+            "dist/pycdc-rapid-linux-x86_64.zip"
+            "dist/pycdc-rapid-windows-x86_64-dynamic.zip"
+            "dist/pycdc-rapid-windows-x86_64-static.zip"
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "$RELEASE_TITLE"
+            --notes "由 GitHub CI 自动构建并发布。"
+          )
+
+          if [[ "$PRERELEASE" == "true" ]]; then
+            arguments+=(--prerelease)
+          fi
+
+          gh release create "${arguments[@]}"

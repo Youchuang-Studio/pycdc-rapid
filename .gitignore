@@ -7,4 +7,6 @@
 __pycache__
 tests-out
 build/
+build-debug/
+build-release/
 .vscode/
