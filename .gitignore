@@ -9,4 +9,5 @@ tests-out
 build/
 build-debug/
 build-release/
+/pyc/
 .vscode/

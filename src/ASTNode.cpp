@@ -14,6 +14,27 @@ void ASTNodeList::removeFirst()
     m_nodes.erase(m_nodes.begin());
 }
 
+void ASTNodeList::removeAllReturns()
+{
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ) {
+        if ((*it).type() == ASTNode::NODE_RETURN) {
+            it = m_nodes.erase(it);
+            continue;
+        }
+        if ((*it).type() == ASTNode::NODE_BLOCK)
+            (*it).cast<ASTBlock>()->removeAllReturns();
+        ++it;
+    }
+}
+
+void ASTNodeList::removeCompilerArtifacts()
+{
+    for (auto& node : m_nodes) {
+        if (node.type() == ASTNode::NODE_BLOCK)
+            node.cast<ASTBlock>()->removeCompilerArtifacts();
+    }
+}
+
 
 /* ASTUnary */
 const char* ASTUnary::op_str() const
@@ -197,6 +218,19 @@ void ASTBlock::removeFirst()
     m_nodes.erase(m_nodes.begin());
 }
 
+void ASTBlock::removeAllReturns()
+{
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ) {
+        if ((*it).type() == ASTNode::NODE_RETURN) {
+            it = m_nodes.erase(it);
+            continue;
+        }
+        if ((*it).type() == ASTNode::NODE_BLOCK)
+            (*it).cast<ASTBlock>()->removeAllReturns();
+        ++it;
+    }
+}
+
 void ASTBlock::pruneUnreachableAfterReturn()
 {
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
@@ -208,6 +242,67 @@ void ASTBlock::pruneUnreachableAfterReturn()
         auto eraseFrom = it;
         ++eraseFrom;
         m_nodes.erase(eraseFrom, m_nodes.end());
+        break;
+    }
+}
+
+static bool isDeadNoneGuard(const PycRef<ASTNode>& node)
+{
+    if (node.type() != ASTNode::NODE_BLOCK)
+        return false;
+    PycRef<ASTBlock> block = node.cast<ASTBlock>();
+    if (block->blktype() != ASTBlock::BLK_IF)
+        return false;
+    bool emptyBody = block->size() == 0;
+    if (!emptyBody && block->size() == 1) {
+        PycRef<ASTNode> only = block->nodes().front();
+        emptyBody = only.type() == ASTNode::NODE_KEYWORD
+                && only.cast<ASTKeyword>()->key() == ASTKeyword::KW_PASS;
+    }
+    if (!emptyBody)
+        return false;
+    PycRef<ASTCondBlock> cond = block.try_cast<ASTCondBlock>();
+    if (cond == nullptr || !cond->negative())
+        return false;
+    /* LOAD_CONST None is represented as the null AST placeholder.  Accept an
+       explicit None object too for bytecode versions that retain it. */
+    return cond->cond() == nullptr
+            || (cond->cond().type() == ASTNode::NODE_OBJECT
+                && cond->cond().cast<ASTObject>()->object() == Pyc_None);
+}
+
+void ASTBlock::removeCompilerArtifacts()
+{
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ) {
+        if ((*it).type() == ASTNode::NODE_BLOCK)
+            (*it).cast<ASTBlock>()->removeCompilerArtifacts();
+        if (isDeadNoneGuard(*it)) {
+            it = m_nodes.erase(it);
+            continue;
+        }
+        ++it;
+    }
+
+    /* A synthetic constant-false guard can split duplicate return cleanup.
+       Once those guards are gone, discard only a trailing run made entirely
+       of returns after an earlier return; do not prune arbitrary statements. */
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        if ((*it).type() != ASTNode::NODE_RETURN
+                || (*it).cast<ASTReturn>()->rettype() != ASTReturn::RETURN)
+            continue;
+        auto tail = it;
+        ++tail;
+        if (tail == m_nodes.end())
+            break;
+        bool returnOnly = true;
+        for (auto scan = tail; scan != m_nodes.end(); ++scan) {
+            if ((*scan).type() != ASTNode::NODE_RETURN) {
+                returnOnly = false;
+                break;
+            }
+        }
+        if (returnOnly)
+            m_nodes.erase(tail, m_nodes.end());
         break;
     }
 }

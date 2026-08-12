@@ -1,0 +1,45 @@
+def safe_string ( value ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+return str ( value ) <EOL>
+<OUTDENT>
+except Exception : <EOL>
+<INDENT>
+return None <EOL>
+<OUTDENT>
+<OUTDENT>
+def show_message ( message , title = 'Error' ) : <EOL>
+<INDENT>
+return title <EOL>
+<OUTDENT>
+def first_value ( values ) : <EOL>
+<INDENT>
+for value in values : <EOL>
+<INDENT>
+return value <EOL>
+<OUTDENT>
+<OUTDENT>
+def local_import_aliases ( ) : <EOL>
+<INDENT>
+from datetime import datetime as _dt , timedelta as _td <EOL>
+return ( _dt , _td ) <EOL>
+<OUTDENT>
+def segmented_try ( value ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if value is None : <EOL>
+<INDENT>
+return None <EOL>
+<OUTDENT>
+number = int ( value ) <EOL>
+if number <= 0 : <EOL>
+<INDENT>
+return 0 <EOL>
+<OUTDENT>
+return number <EOL>
+<OUTDENT>
+except ( ValueError , TypeError ) : <EOL>
+<INDENT>
+return - 1 <EOL>

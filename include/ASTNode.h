@@ -72,6 +72,8 @@ public:
     const list_t& nodes() const { return m_nodes; }
     void removeFirst();
     void removeLast();
+    void removeAllReturns();
+    void removeCompilerArtifacts();
     void append(PycRef<ASTNode> node) { m_nodes.emplace_back(std::move(node)); }
 
 protected:
@@ -268,6 +270,7 @@ public:
     PycRef<ASTNode> code() const { return m_code; }
     const defarg_t& defargs() const { return m_defargs; }
     const defarg_t& kwdefargs() const { return m_kwdefargs; }
+    void setDefargs(defarg_t defArgs) { m_defargs = std::move(defArgs); }
 
     typedef std::list<PycRef<ASTNode>> decorator_t;
     const decorator_t& decorators() const { return m_decorators; }
@@ -576,7 +579,9 @@ public:
     list_t::size_type size() const { return m_nodes.size(); }
     void removeFirst();
     void removeLast();
+    void removeAllReturns();
     void pruneUnreachableAfterReturn();
+    void removeCompilerArtifacts();
     void append(PycRef<ASTNode> node) { m_nodes.emplace_back(std::move(node)); }
     const char* type_str() const;
 
@@ -684,11 +689,13 @@ class ASTComprehension : public ASTNode {
 public:
     typedef std::list<PycRef<ASTIterBlock>> generator_t;
 
-    ASTComprehension(PycRef<ASTNode> result)
-        : ASTNode(NODE_COMPREHENSION), m_result(std::move(result)) { }
+    ASTComprehension(PycRef<ASTNode> result, bool generatorExpr = false)
+        : ASTNode(NODE_COMPREHENSION), m_result(std::move(result)),
+          m_generator_expr(generatorExpr) { }
 
     PycRef<ASTNode> result() const { return m_result; }
     generator_t generators() const { return m_generators; }
+    bool isGeneratorExpr() const { return m_generator_expr; }
 
     void addGenerator(PycRef<ASTIterBlock> gen) {
         m_generators.emplace_front(std::move(gen));
@@ -697,6 +704,7 @@ public:
 private:
     PycRef<ASTNode> m_result;
     generator_t m_generators;
+    bool m_generator_expr;
 
 };
 
