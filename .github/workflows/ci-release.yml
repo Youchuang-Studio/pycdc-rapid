@@ -10,6 +10,10 @@ on:
         description: Release title
         required: true
         type: string
+      release_notes:
+        description: Release notes in Markdown (optional)
+        required: false
+        type: string
       prerelease:
         description: Mark as a prerelease
         required: true
@@ -43,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure Debug
         run: |
@@ -83,7 +87,7 @@ jobs:
             pycdc pycdas README.markdown LICENSE
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-package
           path: dist/pycdc-rapid-linux-x86_64.zip
@@ -100,7 +104,7 @@ jobs:
         runtime: [dynamic, static]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure
         shell: pwsh
@@ -145,7 +149,7 @@ jobs:
           Compress-Archive -Path "$packageDir/*" -DestinationPath "dist/$packageName.zip"
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.runtime }}-package
           path: dist/pycdc-rapid-windows-x86_64-${{ matrix.runtime }}.zip
@@ -161,7 +165,7 @@ jobs:
       contents: write
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -181,13 +185,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
           release_tag="${GITHUB_SHA::7}"
+          notes_file="$RUNNER_TEMP/release-notes.md"
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $release_tag already exists." >&2
             exit 1
+          fi
+
+          if [[ -z "${RELEASE_NOTES//[[:space:]]/}" ]]; then
+            printf '%s\n' '由 GitHub CI 自动构建并发布。' > "$notes_file"
+          else
+            printf '%s\n' "$RELEASE_NOTES" > "$notes_file"
           fi
 
           arguments=(
@@ -199,7 +211,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
             --target "$GITHUB_SHA"
             --title "$RELEASE_TITLE"
-            --notes "由 GitHub CI 自动构建并发布。"
+            --notes-file "$notes_file"
           )
 
           if [[ "$PRERELEASE" == "true" ]]; then
