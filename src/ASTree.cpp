@@ -3551,6 +3551,42 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     /* Offset is relative in these cases */
                     offs = ast_relative_jump_target(mod, opcode, operand, pos, false);
                 }
+                if (mod->verCompare(3, 12) >= 0
+                        && (opcode == Pyc::POP_JUMP_IF_TRUE_A
+                            || opcode == Pyc::POP_JUMP_IF_FALSE_A
+                            || opcode == Pyc::POP_JUMP_FORWARD_IF_TRUE_A
+                            || opcode == Pyc::POP_JUMP_FORWARD_IF_FALSE_A)) {
+                    /* At the tail of a for body CPython can emit two adjacent
+                       JUMP_BACKWARD instructions to the same loop header: one
+                       is an explicit `continue`, the other is normal loop
+                       fallthrough.  In that degenerate shape the source if
+                       condition describes the taken jump, not the fallthrough
+                       region used by the normal reconstruction rule. */
+                    auto readBackedgeTarget = [&](int at, int& target) {
+                        int op = 0, arg = 0, after = 0;
+                        do {
+                            if (!ast_read_wordcode_instr(code->code(), mod, at,
+                                    op, arg, after))
+                                return false;
+                            at = after;
+                        } while (op == Pyc::CACHE || op == Pyc::NOT_TAKEN
+                                || op == Pyc::INSTRUMENTED_NOT_TAKEN_A);
+                        if (op != Pyc::JUMP_BACKWARD_A
+                                && op != Pyc::JUMP_BACKWARD_NO_INTERRUPT_A
+                                && op != Pyc::INSTRUMENTED_JUMP_BACKWARD_A)
+                            return false;
+                        target = ast_relative_jump_target(mod, op, arg, after,
+                                true);
+                        return true;
+                    };
+                    int fallthroughTarget = -1, takenTarget = -2;
+                    if (readBackedgeTarget(pos, fallthroughTarget)
+                            && readBackedgeTarget(offs, takenTarget)
+                            && fallthroughTarget == takenTarget) {
+                        neg = opcode == Pyc::POP_JUMP_IF_FALSE_A
+                                || opcode == Pyc::POP_JUMP_FORWARD_IF_FALSE_A;
+                    }
+                }
                 if (py314CopiedShortCircuit) {
                     if (!stack_hist.empty())
                         stack_hist.pop();
@@ -4095,12 +4131,11 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 else if (mod->verCompare(3, 10) >= 0)
                     offs *= sizeof(uint16_t); // // BPO-27129
 
-                /* Python 3.12+ compiles `break` as a forward jump across the
-                   loop's END_FOR / POP_TOP cleanup.  Recognize only that exact
-                   shape: the nearest open loop must end inside the skipped
-                   interval and every skipped instruction must be loop cleanup.
-                   This also prevents the hidden iterator from later becoming
-                   a bare `range(...)` expression. */
+                /* Python 3.12+ compiles `break` as a forward jump to just past
+                   the loop's END_FOR / POP_TOP cleanup.  The jump can occur
+                   before the rest of the loop body, so validate the cleanup
+                   trailer at the loop end rather than requiring the entire
+                   skipped interval to contain cleanup only. */
                 if (mod->verCompare(3, 12) >= 0) {
                     PycRef<ASTBlock> loop;
                     std::stack<PycRef<ASTBlock> > pending = blocks;
@@ -4114,8 +4149,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         pending.pop();
                     }
                     bool sawEndFor = false;
-                    bool cleanupOnly = true;
-                    int scanPos = pos;
+                    bool cleanupOnly = loop != NULL && curpos < loop->end()
+                            && loop->end() < offs;
+                    int scanPos = cleanupOnly ? loop->end() : offs;
                     while (cleanupOnly && scanPos < offs) {
                         int scanOp = 0, scanArg = 0, scanAfter = 0;
                         if (!ast_read_wordcode_instr(code->code(), mod, scanPos,
@@ -4139,14 +4175,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             && scanPos == offs) {
                         PycRef<ASTNode> breakNode =
                                 new ASTKeyword(ASTKeyword::KW_BREAK);
-                        bool appendedToTry = false;
+                        PycRef<ASTBlock> breakDest = curblock;
                         /* Exception-table handlers can be decoded out of
                            line and reattached before this success jump is
                            visited.  In that case the current loop already
                            ends with a complete try/except container; the
                            source break belongs to its try body. */
                         for (auto outer = loop->nodes().rbegin();
-                                outer != loop->nodes().rend() && !appendedToTry;
+                                outer != loop->nodes().rend();
                                 ++outer) {
                             if ((*outer).type() != ASTNode::NODE_BLOCK
                                     || (*outer).cast<ASTBlock>()->blktype()
@@ -4158,22 +4194,30 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                                 if (child.type() == ASTNode::NODE_BLOCK
                                         && child.cast<ASTBlock>()->blktype()
                                             == ASTBlock::BLK_TRY) {
-                                    child.cast<ASTBlock>()->append(breakNode);
-                                    appendedToTry = true;
+                                    breakDest = child.cast<ASTBlock>();
                                     break;
                                 }
                             }
+                            if (breakDest != curblock)
+                                break;
                         }
-                        if (!appendedToTry)
-                            curblock->append(breakNode);
                         /* A second iterator-cleanup POP_TOP can precede the
                            jump itself.  It has already been decoded by this
                            point, so remove it only when it is the loop's exact
                            iterator node at the end of the loop body. */
                         if (!loop->nodes().empty()
-                                && loop->nodes().back() ==
-                                    loop.cast<ASTIterBlock>()->iter())
+                                && (loop->nodes().back() ==
+                                        loop.cast<ASTIterBlock>()->iter()
+                                    || sameName(loop->nodes().back(),
+                                        loop.cast<ASTIterBlock>()->iter())))
                             loop->removeLast();
+                        if (breakDest != loop && !breakDest->nodes().empty()
+                                && (breakDest->nodes().back() ==
+                                        loop.cast<ASTIterBlock>()->iter()
+                                    || sameName(breakDest->nodes().back(),
+                                        loop.cast<ASTIterBlock>()->iter())))
+                            breakDest->removeLast();
+                        breakDest->append(breakNode);
                         skipNextPopTop = true;
                         break;
                     }
@@ -5423,6 +5467,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
 
                     if (--unpack <= 0) {
+                        if (unpackStar >= 0)
+                            tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
@@ -5461,6 +5507,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
 
                     if (--unpack <= 0) {
+                        if (unpackStar >= 0)
+                            tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
@@ -5586,6 +5634,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
 
                     if (--unpack <= 0) {
+                        if (unpackStar >= 0)
+                            tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
@@ -5686,6 +5736,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
 
                     if (--unpack <= 0) {
+                        if (unpackStar >= 0)
+                            tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
@@ -5731,6 +5783,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
 
                     if (--unpack <= 0) {
+                        if (unpackStar >= 0)
+                            tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
@@ -5867,6 +5921,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
 
                     if (--unpack <= 0) {
+                        if (unpackStar >= 0)
+                            tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
@@ -6442,7 +6498,10 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
         {
             PycRef<ASTUnary> un = node.cast<ASTUnary>();
             pyc_output << un->op_str();
-            print_ordered(node, un->operand(), mod, pyc_output);
+            if (un->op() == ASTUnary::UN_STAR)
+                print_src(un->operand(), mod, pyc_output);
+            else
+                print_ordered(node, un->operand(), mod, pyc_output);
         }
         break;
     case ASTNode::NODE_CALL:
