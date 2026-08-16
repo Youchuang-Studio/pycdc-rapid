@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       release_notes:
-        description: Release notes in Markdown (optional)
+        description: 'Release notes in Markdown; use \n for line breaks in the Actions UI (optional)'
         required: false
         type: string
       prerelease:
@@ -199,7 +199,11 @@ jobs:
           if [[ -z "${RELEASE_NOTES//[[:space:]]/}" ]]; then
             printf '%s\n' '由 GitHub CI 自动构建并发布。' > "$notes_file"
           else
-            printf '%s\n' "$RELEASE_NOTES" > "$notes_file"
+            # workflow_dispatch renders string inputs as a single-line field.
+            # Decode only literal \n sequences so Markdown pasted through the
+            # Actions UI can retain headings, paragraphs, and lists. Actual
+            # newlines supplied by the API or `gh workflow run` remain intact.
+            printf '%s\n' "$RELEASE_NOTES" | perl -0pe 's/\\n/\n/g' > "$notes_file"
           fi
 
           arguments=(
