@@ -1,0 +1,11 @@
+def f ( y , z ) : <EOL>
+<INDENT>
+a = [ i for i in y ] <EOL>
+b = [ i * 2 for i in y if i ] <EOL>
+c = { i for i in y if i is not None } <EOL>
+d = { k : v for k , v in y } <EOL>
+e = [ i + j for i in y if i for j in z if j ] <EOL>
+g = [ i for i in y if not i ] <EOL>
+h = list ( ( i for i in y if i > 1 ) ) <EOL>
+k = any ( ( w in z for w in y ) ) <EOL>
+return ( a , b , c , d , e , g , h , k ) <EOL>

@@ -1,0 +1,38 @@
+def a ( self ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( ) <EOL>
+<OUTDENT>
+finally : <EOL>
+<INDENT>
+self . done ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def b ( self , ok ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if ok : <EOL>
+<INDENT>
+self . x = 1 <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+self . y = 2 <EOL>
+<OUTDENT>
+<OUTDENT>
+finally : <EOL>
+<INDENT>
+self . done ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def c ( self ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+return g ( ) <EOL>
+<OUTDENT>
+finally : <EOL>
+<INDENT>
+self . done ( ) <EOL>

@@ -1,0 +1,44 @@
+def drain_one ( q ) : <EOL>
+<INDENT>
+while q : <EOL>
+<INDENT>
+q . pop ( ) <EOL>
+<OUTDENT>
+q . close ( ) <EOL>
+<OUTDENT>
+def drain ( queues ) : <EOL>
+<INDENT>
+for q in queues : <EOL>
+<INDENT>
+while q : <EOL>
+<INDENT>
+q . pop ( ) <EOL>
+<OUTDENT>
+q . close ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def walk ( rows ) : <EOL>
+<INDENT>
+for row in rows : <EOL>
+<INDENT>
+while row : <EOL>
+<INDENT>
+if row . ok : <EOL>
+<INDENT>
+return row <EOL>
+<OUTDENT>
+row = row . next <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+def poll ( source ) : <EOL>
+<INDENT>
+while source . open : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+source . read ( ) <EOL>
+<OUTDENT>
+except IOError : <EOL>
+<INDENT>
+source . reset ( ) <EOL>

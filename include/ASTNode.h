@@ -186,9 +186,16 @@ public:
     };
 
     ASTCompare(PycRef<ASTNode> left, PycRef<ASTNode> right, int op)
-        : ASTBinary(std::move(left), std::move(right), op, NODE_COMPARE) { }
+        : ASTBinary(std::move(left), std::move(right), op, NODE_COMPARE), m_chained() { }
 
     const char* op_str() const override;
+
+    // Chained comparison: the left side is the preceding comparison of `a < b < c`
+    bool chained() const { return m_chained; }
+    void setChained() { m_chained = true; }
+
+private:
+    bool m_chained;
 };
 
 
@@ -346,7 +353,7 @@ public:
 
     ASTImport(PycRef<ASTNode> name, PycRef<ASTNode> fromlist, int level = 0)
         : ASTNode(NODE_IMPORT), m_name(std::move(name)),
-          m_fromlist(std::move(fromlist)), m_level(level) { }
+          m_fromlist(std::move(fromlist)), m_level(level), m_lazy(), m_moduleAlias() { }
 
     PycRef<ASTNode> name() const { return m_name; }
     list_t stores() const { return m_stores; }
@@ -355,12 +362,21 @@ public:
     PycRef<ASTNode> fromlist() const { return m_fromlist; }
     int level() const { return m_level; }
 
+    bool lazy() const { return m_lazy; }
+    void setLazy(bool lazy) { m_lazy = lazy; }
+
+    // Result of IMPORT_FROM walking `import a.b as c`: always printed with its alias
+    bool moduleAlias() const { return m_moduleAlias; }
+    void setModuleAlias(bool alias) { m_moduleAlias = alias; }
+
 private:
     PycRef<ASTNode> m_name;
     list_t m_stores;
 
     PycRef<ASTNode> m_fromlist;
     int m_level;
+    bool m_lazy;
+    bool m_moduleAlias;
 };
 
 

@@ -1,0 +1,34 @@
+class Base : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+class Child ( Base , object ) : <EOL>
+<INDENT>
+x = 1 <EOL>
+<OUTDENT>
+class Meta ( type ) : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+class WithMeta ( Base , metaclass = Meta ) : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+class OnlyMeta ( metaclass = Meta ) : <EOL>
+<INDENT>
+x = 1 <EOL>
+<OUTDENT>
+def deco ( c ) : <EOL>
+<INDENT>
+return c <EOL>
+<OUTDENT>
+@ deco <EOL>
+class Decorated : <EOL>
+<INDENT>
+y = 'first' <EOL>
+<OUTDENT>
+@ deco <EOL>
+@ deco <EOL>
+class Twice : <EOL>
+<INDENT>
+pass <EOL>

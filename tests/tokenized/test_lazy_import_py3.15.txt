@@ -1,0 +1,3 @@
+lazy import os <EOL>
+lazy from sys import path <EOL>
+import json <EOL>

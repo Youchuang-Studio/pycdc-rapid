@@ -1,0 +1,41 @@
+def pick ( select , value ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+select . select_by_value ( value ) <EOL>
+<OUTDENT>
+except : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+select . select_by_visible_text ( value ) <EOL>
+<OUTDENT>
+except : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+<OUTDENT>
+select . done ( ) <EOL>
+<OUTDENT>
+def typed ( select , value ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+select . open ( value ) <EOL>
+<OUTDENT>
+except KeyError as e : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+select . retry ( e ) <EOL>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+select . log ( e ) <EOL>
+<OUTDENT>
+<OUTDENT>
+except TypeError : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+select . done ( ) <EOL>

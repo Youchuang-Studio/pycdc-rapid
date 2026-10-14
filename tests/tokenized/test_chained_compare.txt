@@ -1,0 +1,17 @@
+def in_range ( lo , x , hi ) : <EOL>
+<INDENT>
+return lo <= x < hi <EOL>
+<OUTDENT>
+def classify ( a , b , c , d ) : <EOL>
+<INDENT>
+ordered = a < b < c < d <EOL>
+same = a == b == c <EOL>
+if 0 <= a < 10 : <EOL>
+<INDENT>
+print ( 'digit' ) <EOL>
+<OUTDENT>
+return ( ordered , same ) <EOL>
+<OUTDENT>
+def member ( x , group , other ) : <EOL>
+<INDENT>
+return x in group is not other <EOL>

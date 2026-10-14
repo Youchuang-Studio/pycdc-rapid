@@ -469,7 +469,15 @@ void bc_disasm(std::ostream& pyc_output, PycRef<PycCode> code, PycModule* mod,
                     auto arg = operand;
                     if (opcode == Pyc::LOAD_ATTR_A && mod->verCompare(3, 12) >= 0)
                         arg >>= 1;
+                    if (opcode == Pyc::IMPORT_NAME_A && mod->verCompare(3, 15) >= 0)
+                        arg >>= 2;
                     formatted_print(pyc_output, "%d: %s", operand, code->getName(arg)->value());
+                    if (opcode == Pyc::IMPORT_NAME_A && mod->verCompare(3, 15) >= 0) {
+                        if (operand & 1)
+                            pyc_output << " + lazy";
+                        else if (operand & 2)
+                            pyc_output << " + eager";
+                    }
                 } catch (const std::out_of_range &) {
                     formatted_print(pyc_output, "%d <INVALID>", operand);
                 }

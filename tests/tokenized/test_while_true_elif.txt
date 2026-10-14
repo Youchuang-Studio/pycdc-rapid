@@ -1,0 +1,30 @@
+def read_password ( getch ) : <EOL>
+<INDENT>
+password = '' <EOL>
+while True : <EOL>
+<INDENT>
+char = getch ( ) <EOL>
+if char in ( '\r' , '\n' ) : <EOL>
+<INDENT>
+print ( '' ) <EOL>
+break <EOL>
+<OUTDENT>
+if char == '\x08' : <EOL>
+<INDENT>
+if len ( password ) > 0 : <EOL>
+<INDENT>
+password = password [ : - 1 ] <EOL>
+print ( '\x08 \x08' ) <EOL>
+<OUTDENT>
+<OUTDENT>
+elif char == '\x03' : <EOL>
+<INDENT>
+raise KeyboardInterrupt <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+password += char <EOL>
+<OUTDENT>
+<OUTDENT>
+print ( len ( password ) ) <EOL>
+return password <EOL>

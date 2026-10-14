@@ -1,0 +1,52 @@
+def find ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+if x : <EOL>
+<INDENT>
+return x <EOL>
+<OUTDENT>
+<OUTDENT>
+done ( ) <EOL>
+<OUTDENT>
+def find_nested ( rows ) : <EOL>
+<INDENT>
+for row in rows : <EOL>
+<INDENT>
+for cell in row : <EOL>
+<INDENT>
+if cell : <EOL>
+<INDENT>
+return cell <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+def has_nested ( rows ) : <EOL>
+<INDENT>
+for row in rows : <EOL>
+<INDENT>
+for cell in row : <EOL>
+<INDENT>
+if cell : <EOL>
+<INDENT>
+return True <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return False <EOL>
+<OUTDENT>
+def find_safe ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if check ( x ) : <EOL>
+<INDENT>
+return x <EOL>
+<OUTDENT>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+pass <EOL>

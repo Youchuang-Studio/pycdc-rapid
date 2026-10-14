@@ -1,0 +1,17 @@
+class Priv : <EOL>
+<INDENT>
+def __init__ ( self , __arg = 2 ) : <EOL>
+<INDENT>
+self . __secret = __arg <EOL>
+self . __dunder__ = 3 <EOL>
+<OUTDENT>
+def get ( self ) : <EOL>
+<INDENT>
+return self . __secret <EOL>
+<OUTDENT>
+def __hidden ( self ) : <EOL>
+<INDENT>
+return self . __secret <EOL>
+<OUTDENT>
+<OUTDENT>
+value = Priv ( ) . _Priv__secret <EOL>

@@ -1,0 +1,7 @@
+f ( a , b = 1 ) <EOL>
+g ( c = 2 , d = 3 ) <EOL>
+h ( 1 , * x , k = 2 ) <EOL>
+h ( * x , * y ) <EOL>
+h ( a , * x , b , ** kw ) <EOL>
+h ( ** kw , k = 1 ) <EOL>
+o . m ( * x , ** kw ) <EOL>

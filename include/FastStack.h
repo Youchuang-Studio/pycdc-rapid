@@ -67,6 +67,11 @@ public:
         return true;
     }
 
+    int size() const
+    {
+        return m_ptr + 1;
+    }
+
     bool empty() const
     {
         return m_ptr == -1;

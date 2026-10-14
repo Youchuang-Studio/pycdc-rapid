@@ -1,0 +1,24 @@
+def no_doc ( x ) : <EOL>
+<INDENT>
+if x : <EOL>
+<INDENT>
+return 'first const' <EOL>
+<OUTDENT>
+return True <EOL>
+<OUTDENT>
+def with_doc ( ) : <EOL>
+<INDENT>
+'real doc' <EOL>
+return 'other' <EOL>
+<OUTDENT>
+class Holder : <EOL>
+<INDENT>
+'class doc' <EOL>
+def method ( self ) : <EOL>
+<INDENT>
+return 'first const' <EOL>
+<OUTDENT>
+def documented ( self ) : <EOL>
+<INDENT>
+'method doc' <EOL>
+return 1 <EOL>

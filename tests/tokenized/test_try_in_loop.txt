@@ -1,0 +1,72 @@
+def skip_errors ( items ) : <EOL>
+<INDENT>
+for item in items : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+handle ( item ) <EOL>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+log ( item ) <EOL>
+<OUTDENT>
+done ( ) <EOL>
+<OUTDENT>
+def first_ok ( items ) : <EOL>
+<INDENT>
+for item in items : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+value = convert ( item ) <EOL>
+<OUTDENT>
+except Exception : <EOL>
+<INDENT>
+value = None <EOL>
+<OUTDENT>
+if value : <EOL>
+<INDENT>
+return value <EOL>
+<OUTDENT>
+<OUTDENT>
+done ( ) <EOL>
+<OUTDENT>
+def load ( n ) : <EOL>
+<INDENT>
+ok = False <EOL>
+for attempt in range ( n ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+get ( ) <EOL>
+ok = True <EOL>
+break <EOL>
+<OUTDENT>
+except Exception as e : <EOL>
+<INDENT>
+if attempt == n - 1 : <EOL>
+<INDENT>
+raise Exception ( str ( e ) ) <EOL>
+<OUTDENT>
+sleep ( 2 ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return ok <EOL>
+<OUTDENT>
+def load_first ( n ) : <EOL>
+<INDENT>
+for attempt in range ( n ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+get ( ) <EOL>
+break <EOL>
+<OUTDENT>
+except Exception : <EOL>
+<INDENT>
+sleep ( 2 ) <EOL>
+<OUTDENT>
+<OUTDENT>
+done ( ) <EOL>

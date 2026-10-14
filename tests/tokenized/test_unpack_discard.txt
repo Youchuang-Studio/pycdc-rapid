@@ -1,0 +1,16 @@
+def f ( g , h ) : <EOL>
+<INDENT>
+( a , _ , _ ) = g ( ) <EOL>
+x = h ( a ) <EOL>
+for p , _ , _ in g ( ) : <EOL>
+<INDENT>
+x = p <EOL>
+<OUTDENT>
+return ( a , x ) <EOL>
+<OUTDENT>
+class A : <EOL>
+<INDENT>
+def m ( self , mk ) : <EOL>
+<INDENT>
+( fd , self . path ) = mk ( ) <EOL>
+return fd <EOL>

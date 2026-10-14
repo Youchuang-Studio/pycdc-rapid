@@ -47,6 +47,8 @@ public:
         CO_FUTURE_GENERATOR_STOP = 0x800000,                // 3.5 ->
         CO_FUTURE_ANNOTATIONS = 0x1000000,                  // 3.7 ->
         CO_NO_MONITORING_EVENTS = 0x2000000,                // 3.13 ->
+        CO_HAS_DOCSTRING = 0x4000000,                       // 3.14 ->
+        CO_METHOD = 0x8000000,                              // 3.14 ->
     };
 
     PycCode(int type = TYPE_CODE)

@@ -1,0 +1,16 @@
+class Base : <EOL>
+<INDENT>
+def m ( self ) : <EOL>
+<INDENT>
+return 1 <EOL>
+<OUTDENT>
+<OUTDENT>
+class Child ( Base ) : <EOL>
+<INDENT>
+def m ( self ) : <EOL>
+<INDENT>
+return super ( ) . m ( ) + 1 <EOL>
+<OUTDENT>
+def n ( self ) : <EOL>
+<INDENT>
+return super ( Child , self ) . m <EOL>

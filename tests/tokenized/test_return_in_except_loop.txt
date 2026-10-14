@@ -1,0 +1,44 @@
+def click ( el , n ) : <EOL>
+<INDENT>
+for i in range ( n ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+el . click ( ) <EOL>
+return True <EOL>
+<OUTDENT>
+except Exception : <EOL>
+<INDENT>
+if i == n - 1 : <EOL>
+<INDENT>
+return False <EOL>
+<OUTDENT>
+wait ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+def click_fallback ( el , n ) : <EOL>
+<INDENT>
+for i in range ( n ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+el . click ( ) <EOL>
+return True <EOL>
+<OUTDENT>
+except Exception : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+el . tap ( ) <EOL>
+<OUTDENT>
+except Exception : <EOL>
+<INDENT>
+if i == n - 1 : <EOL>
+<INDENT>
+return False <EOL>
+<OUTDENT>
+wait ( ) <EOL>
+continue <EOL>
+<OUTDENT>
+return True <EOL>

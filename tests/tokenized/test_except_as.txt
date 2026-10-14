@@ -1,0 +1,49 @@
+def a ( self ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( ) <EOL>
+<OUTDENT>
+except Exception as e : <EOL>
+<INDENT>
+self . log ( e ) <EOL>
+<OUTDENT>
+self . refresh ( ) <EOL>
+<OUTDENT>
+def b ( self ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( ) <EOL>
+<OUTDENT>
+except ValueError as e : <EOL>
+<INDENT>
+return e <EOL>
+<OUTDENT>
+except KeyError as k : <EOL>
+<INDENT>
+raise <EOL>
+<OUTDENT>
+<OUTDENT>
+def c ( self ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( ) <EOL>
+<OUTDENT>
+except ( A , B ) as e : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+h ( ) <EOL>
+<OUTDENT>
+except C as inner : <EOL>
+<INDENT>
+self . log ( inner , e ) <EOL>
+<OUTDENT>
+<OUTDENT>
+except D : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+self . refresh ( ) <EOL>

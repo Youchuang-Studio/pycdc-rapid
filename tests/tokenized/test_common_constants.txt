@@ -1,0 +1,13 @@
+def defaults ( ) : <EOL>
+<INDENT>
+name = '' <EOL>
+flag = True <EOL>
+other = False <EOL>
+nothing = None <EOL>
+index = - 1 <EOL>
+return ( name , flag , other , nothing , index ) <EOL>
+<OUTDENT>
+def greet ( text ) : <EOL>
+<INDENT>
+print ( '' ) <EOL>
+return text or '' <EOL>

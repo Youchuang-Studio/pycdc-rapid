@@ -1,0 +1,20 @@
+def first ( a , b ) : <EOL>
+<INDENT>
+return a or b <EOL>
+<OUTDENT>
+def both ( a , b ) : <EOL>
+<INDENT>
+return a and b <EOL>
+<OUTDENT>
+def chains ( a , b , c ) : <EOL>
+<INDENT>
+x = a or b or c <EOL>
+y = a and b and c <EOL>
+z = a or b and c <EOL>
+return ( x , y , z ) <EOL>
+<OUTDENT>
+def pick ( match ) : <EOL>
+<INDENT>
+token = match . group ( 1 ) or match . group ( 2 ) <EOL>
+print ( token or '' ) <EOL>
+return isinstance ( token , str ) and token != '' <EOL>

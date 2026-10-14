@@ -1,0 +1,23 @@
+def drain ( q ) : <EOL>
+<INDENT>
+while q : <EOL>
+<INDENT>
+x = q . pop ( ) <EOL>
+if x : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+print ( x ) <EOL>
+<OUTDENT>
+done ( ) <EOL>
+<OUTDENT>
+def first ( get ) : <EOL>
+<INDENT>
+while True : <EOL>
+<INDENT>
+x = get ( ) <EOL>
+if x : <EOL>
+<INDENT>
+return x <EOL>
+<OUTDENT>
+print ( x ) <EOL>

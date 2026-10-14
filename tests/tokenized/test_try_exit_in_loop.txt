@@ -1,0 +1,48 @@
+def continue_in_try ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+a ( x ) <EOL>
+continue <EOL>
+<OUTDENT>
+except E : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+b ( x ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def return_in_try ( xs , default ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+return parse ( x ) <EOL>
+<OUTDENT>
+except ValueError : <EOL>
+<INDENT>
+log ( x ) <EOL>
+<OUTDENT>
+retry ( x ) <EOL>
+<OUTDENT>
+return default <EOL>
+<OUTDENT>
+def break_in_try ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+send ( x ) <EOL>
+break <EOL>
+<OUTDENT>
+except IOError : <EOL>
+<INDENT>
+wait ( ) <EOL>
+<OUTDENT>
+note ( x ) <EOL>
+<OUTDENT>
+done ( ) <EOL>

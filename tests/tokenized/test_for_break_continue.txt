@@ -1,0 +1,54 @@
+def a ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+if x : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+g ( x ) <EOL>
+<OUTDENT>
+h ( ) <EOL>
+<OUTDENT>
+def b ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+if not x : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+g ( x ) <EOL>
+<OUTDENT>
+h ( ) <EOL>
+<OUTDENT>
+def c ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+for y in x : <EOL>
+<INDENT>
+if y : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+<OUTDENT>
+h ( x ) <EOL>
+<OUTDENT>
+h ( ) <EOL>
+<OUTDENT>
+def d ( xs ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+if x : <EOL>
+<INDENT>
+print ( 'found' ) <EOL>
+break <EOL>
+<OUTDENT>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+print ( 'none' ) <EOL>
+<OUTDENT>
+h ( ) <EOL>
