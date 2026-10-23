@@ -318,3 +318,41 @@ p . pop ( ) <EOL>
 <OUTDENT>
 <OUTDENT>
 return p <EOL>
+<OUTDENT>
+def f1 ( p ) : <EOL>
+<INDENT>
+while p : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( p ) <EOL>
+<OUTDENT>
+except E : <EOL>
+<INDENT>
+p . pop ( ) <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+return p <EOL>
+<OUTDENT>
+<OUTDENT>
+return 0 <EOL>
+<OUTDENT>
+def f2 ( p ) : <EOL>
+<INDENT>
+while p : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( p ) <EOL>
+<OUTDENT>
+except E : <EOL>
+<INDENT>
+p . pop ( ) <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+return h ( p ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return 0 <EOL>

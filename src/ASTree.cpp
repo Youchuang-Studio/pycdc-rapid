@@ -2743,17 +2743,57 @@ static int ast_py310_while_break_end(PycRef<PycCode> code, PycModule* mod,
     if (elen > 0 && at + elen <= codeLen
             && memcmp(code->code()->value() + at, code->code()->value() + whileEnd, elen) == 0)
         return at + elen;
-    // while True copies the epilogue onto the break and deletes the original
-    int tail = ast_py310_exit_block_len(code, mod, at);
-    if (tail >= 4 && at + tail <= codeLen) {
-        int lastOp = 0, lastArg = 0, lastNext = at, scan = at;
-        while (scan < at + tail
-                && ast_read_wordcode_instr(code->code(), mod, scan, lastOp, lastArg, lastNext))
-            scan = lastNext;
-        if (lastOp == Pyc::RETURN_VALUE || lastOp == Pyc::RETURN_CONST_A)
-            return at + tail;
-    }
     return -1;
+}
+
+// 3.10 parses `else: return` before the except handler, so the else node is appended first
+static void ast_py310_else_after_except(PycRef<ASTContainerBlock> cont)
+{
+    std::vector<PycRef<ASTNode> > order;
+    while (cont->size() != 0) {
+        order.push_back(cont->nodes().back());
+        cont->removeLast();
+    }
+    bool hasExcept = false;
+    for (int i = (int)order.size() - 1; i >= 0; --i) {
+        PycRef<ASTNode> node = order[i];
+        if (node != nullptr && node.type() == ASTNode::NODE_BLOCK
+                && node.cast<ASTBlock>()->blktype() == ASTBlock::BLK_EXCEPT)
+            hasExcept = true;
+    }
+    if (!hasExcept) {
+        for (int i = (int)order.size() - 1; i >= 0; --i)
+            cont->append(order[i]);
+        return;
+    }
+    std::vector<PycRef<ASTNode> > before, elses, after;
+    bool seenExcept = false;
+    bool passedExcept = false;
+    for (int i = (int)order.size() - 1; i >= 0; --i) {
+        PycRef<ASTNode> node = order[i];
+        bool isElse = node != nullptr && node.type() == ASTNode::NODE_BLOCK
+                && node.cast<ASTBlock>()->blktype() == ASTBlock::BLK_ELSE;
+        bool isExcept = node != nullptr && node.type() == ASTNode::NODE_BLOCK
+                && node.cast<ASTBlock>()->blktype() == ASTBlock::BLK_EXCEPT;
+        if (isElse && !passedExcept)
+            elses.push_back(node);
+        else {
+            if (seenExcept && !isExcept)
+                passedExcept = true;
+            if (isExcept)
+                seenExcept = true;
+            if (passedExcept)
+                after.push_back(node);
+            else
+                before.push_back(node);
+        }
+    }
+    for (size_t i = 0; i < before.size(); i++)
+        cont->append(before[i]);
+    for (size_t i = 0; i < elses.size(); i++)
+        cont->append(elses[i]);
+    for (size_t i = 0; i < after.size(); i++)
+        cont->append(after[i]);
 }
 
 static void ast_emit_copied_break(PycRef<ASTBlock>& curblock, PycBuffer& source, PycModule* mod,
@@ -2842,6 +2882,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
     int py39_except_cleanup_var = -1;
     std::string py310SharedEpilogue;
     bool py310EpilogueEmitted = false;
+    std::set<int> py310InlinedElseHandlers; // handler offset of a 3.10 `else: return`
     int py39_normal_cleanup_step = 0;
     int py39_handler_cleanup_step = 0;
     int py39_handler_cleanup_target = -1;
@@ -5034,6 +5075,13 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 
                         curblock = blocks.top();
 
+                        // The inlined else was appended before the excepts; the handler chain ends here
+                        if (curblock->blktype() == ASTBlock::BLK_CONTAINER) {
+                            PycRef<ASTContainerBlock> cont = curblock.cast<ASTContainerBlock>();
+                            if (py310InlinedElseHandlers.erase(cont->except()))
+                                ast_py310_else_after_except(cont);
+                        }
+
                         /* Turn it into an else statement. */
                         // try/except has an else only when a handler exit jumps past the try body's target (just after END_FINALLY)
                         int elseEnd = 0;
@@ -5064,6 +5112,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 if (curblock->blktype() == ASTBlock::BLK_CONTAINER) {
                     /* This marks the end of the except block(s). */
                     PycRef<ASTContainerBlock> cont = curblock.cast<ASTContainerBlock>();
+                    if (py310InlinedElseHandlers.erase(cont->except()))
+                        ast_py310_else_after_except(cont);
                     if (!cont->hasFinally() || isFinally) {
                         /* If there's no finally block, pop the container. */
                         blocks.pop();
@@ -7247,6 +7297,47 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                                     curpos = pos;
                                     bc_next(source, mod, opcode, operand, pos);
                                 }
+                                break;
+                            }
+                        }
+                    }
+                    // `else: return ...` sits between POP_BLOCK and the handler and does not match the while exit.
+                    // A copy of the same bytes later is the implicit return pasted on every clause, not an else.
+                    if (mod->verCompare(3, 10) == 0 && code->code() != nullptr && curblock == ownerTry) {
+                        int tail = ast_py310_exit_block_len(code, mod, pos);
+                        int codeLen = code->code()->length();
+                        int firstOp = 0, firstArg = 0, firstNext = 0;
+                        bool firstRead = ast_read_wordcode_instr(code->code(), mod, pos, firstOp, firstArg, firstNext);
+                        // LOAD_CONST; RETURN is the implicit None/True pasted on a fall-through, not `else:`
+                        if (firstRead && firstOp != Pyc::LOAD_CONST_A
+                                && tail >= 4 && pos + tail == ownerTry->end() && pos + tail < codeLen) {
+                            int lastOp = 0, lastArg = 0, lastNext = 0, scan = pos;
+                            while (scan < pos + tail
+                                    && ast_read_wordcode_instr(code->code(), mod, scan, lastOp, lastArg, lastNext))
+                                scan = lastNext;
+                            const char* bytes = code->code()->value();
+                            bool again = false;
+                            for (int i = pos + tail; i + tail <= codeLen; i += 2) {
+                                if (memcmp(bytes + pos, bytes + i, tail) == 0) {
+                                    again = true;
+                                    break;
+                                }
+                            }
+                            if (!again && (lastOp == Pyc::RETURN_VALUE || lastOp == Pyc::RETURN_CONST_A)
+                                    && blocks.size() > 1) {
+                                if (!stack_hist.empty()) {
+                                    stack = stack_hist.top();
+                                    stack_hist.pop();
+                                }
+                                blocks.pop();
+                                curblock = blocks.top();
+                                curblock->append(ownerTry.cast<ASTNode>());
+                                stack_hist.push(stack);
+                                PycRef<ASTBlock> elseblk = new ASTBlock(ASTBlock::BLK_ELSE, ownerTry->end());
+                                elseblk->init();
+                                blocks.push(elseblk);
+                                curblock = blocks.top();
+                                py310InlinedElseHandlers.insert(ownerTry->end());
                                 break;
                             }
                         }
@@ -9646,6 +9737,9 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             }
 
             if (blk->blktype() == ASTBlock::BLK_CONTAINER) {
+                // 3.10 inlines `else: return` before the handler, so else may sit ahead of except
+                if (mod->verCompare(3, 10) == 0)
+                    ast_py310_else_after_except(blk.cast<ASTContainerBlock>());
                 end_line(pyc_output);
                 print_block(blk, mod, pyc_output);
                 end_line(pyc_output);
