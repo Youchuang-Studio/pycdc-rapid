@@ -2036,7 +2036,9 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                            std::set<int>& whileBackedges,
                            std::set<int>& whileLatchGuards,
                            std::map<int,int>& whileInvertedGuards,
-                           std::map<int,int>& whileDupSkip)
+                           std::map<int,int>& whileDupSkip,
+                           std::set<int>& whileCondJumps,
+                           std::map<int,int>& whileElseAt)
 {
     PycBuffer src(code->code()->value(), code->code()->length());
     int opcode, operand, pos = 0;
@@ -2113,6 +2115,147 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
             if (guard >= 0 && exits == 1) {
                 whileGuardEnd[guard] = end;
                 whileBackedges.insert(b);
+            }
+        }
+        return;
+    }
+
+    // 3.10 while: forward POP_JUMP_IF_* into the loop, body, then a backward POP_JUMP_IF_* to the body
+    if (mod->verCompare(3, 10) == 0) {
+        auto isPopJump = [](int op) {
+            return op == Pyc::POP_JUMP_IF_TRUE_A || op == Pyc::POP_JUMP_IF_FALSE_A;
+        };
+        auto absJump = [&](int p) {
+            return operAt[p] * (int)sizeof(uint16_t);
+        };
+        auto isValue = [](int op) {
+            return op == Pyc::LOAD_FAST_A || op == Pyc::LOAD_NAME_A || op == Pyc::LOAD_GLOBAL_A
+                || op == Pyc::LOAD_CONST_A || op == Pyc::LOAD_DEREF_A || op == Pyc::LOAD_CLASSDEREF_A
+                || op == Pyc::LOAD_ATTR_A || op == Pyc::LOAD_METHOD_A || op == Pyc::LOAD_CLOSURE_A
+                || op == Pyc::BINARY_SUBSCR || op == Pyc::COMPARE_OP_A || op == Pyc::IS_OP_A
+                || op == Pyc::CONTAINS_OP_A || op == Pyc::UNARY_POSITIVE || op == Pyc::UNARY_NEGATIVE
+                || op == Pyc::UNARY_NOT || op == Pyc::UNARY_INVERT
+                || op == Pyc::BINARY_POWER || op == Pyc::BINARY_MULTIPLY || op == Pyc::BINARY_MODULO
+                || op == Pyc::BINARY_ADD || op == Pyc::BINARY_SUBTRACT || op == Pyc::BINARY_LSHIFT
+                || op == Pyc::BINARY_RSHIFT || op == Pyc::BINARY_AND || op == Pyc::BINARY_XOR
+                || op == Pyc::BINARY_OR || op == Pyc::BINARY_FLOOR_DIVIDE || op == Pyc::BINARY_TRUE_DIVIDE
+                || op == Pyc::BINARY_MATRIX_MULTIPLY
+                || op == Pyc::INPLACE_POWER || op == Pyc::INPLACE_MULTIPLY || op == Pyc::INPLACE_MODULO
+                || op == Pyc::INPLACE_ADD || op == Pyc::INPLACE_SUBTRACT || op == Pyc::INPLACE_LSHIFT
+                || op == Pyc::INPLACE_RSHIFT || op == Pyc::INPLACE_AND || op == Pyc::INPLACE_XOR
+                || op == Pyc::INPLACE_OR || op == Pyc::INPLACE_FLOOR_DIVIDE || op == Pyc::INPLACE_TRUE_DIVIDE
+                || op == Pyc::INPLACE_MATRIX_MULTIPLY
+                || op == Pyc::DUP_TOP || op == Pyc::DUP_TOP_TWO || op == Pyc::ROT_TWO
+                || op == Pyc::ROT_THREE || op == Pyc::ROT_FOUR || op == Pyc::ROT_N_A
+                || op == Pyc::BUILD_TUPLE_A || op == Pyc::BUILD_LIST_A || op == Pyc::BUILD_SET_A
+                || op == Pyc::BUILD_MAP_A || op == Pyc::BUILD_CONST_KEY_MAP_A || op == Pyc::BUILD_STRING_A
+                || op == Pyc::BUILD_SLICE_A || op == Pyc::CALL_FUNCTION_A || op == Pyc::CALL_FUNCTION_KW_A
+                || op == Pyc::CALL_FUNCTION_EX_A || op == Pyc::CALL_METHOD_A || op == Pyc::FORMAT_VALUE_A;
+        };
+        std::map<int, int> indexOf;
+        for (size_t i = 0; i < order.size(); i++)
+            indexOf[order[i]] = (int)i;
+        auto prevOf = [&](int p) -> int {
+            std::map<int, int>::iterator found = indexOf.find(p);
+            if (found == indexOf.end() || found->second <= 0)
+                return -1;
+            return order[found->second - 1];
+        };
+        const char* bytes = code->code()->value();
+        int codeLen = code->code()->length();
+        // [from, to) is one or more copies of the returning block that starts at to
+        auto duplicateExit = [&](int from, int to) {
+            if (to <= from || to > codeLen || bytes == nullptr)
+                return false;
+            int span = to - from;
+            for (int elen = 2; elen <= span && elen <= 16 && to + elen <= codeLen; elen += 2) {
+                if (span % elen != 0)
+                    continue;
+                bool match = true;
+                for (int at = from; match && at < to; at += elen)
+                    match = memcmp(bytes + at, bytes + to, elen) == 0;
+                if (!match)
+                    continue;
+                int last = -1;
+                for (int p : order) {
+                    if (p >= to && p < to + elen)
+                        last = p;
+                }
+                if (last >= 0 && opAt[last] == Pyc::RETURN_VALUE)
+                    return true;
+            }
+            return false;
+        };
+        std::map<int, int> lastBack;
+        for (int b : order) {
+            if (!isPopJump(opAt[b]))
+                continue;
+            int target = absJump(b);
+            if (target < b && opAt.count(target))
+                lastBack[target] = b;
+        }
+        for (std::map<int, int>::iterator back = lastBack.begin(); back != lastBack.end(); ++back) {
+            int body = back->first;
+            int b = back->second;
+            std::map<int, int>::iterator git = instrEndingAt.find(body);
+            if (git == instrEndingAt.end() || !isPopJump(opAt[git->second]))
+                continue;
+            int guard = git->second;
+            int exit = absJump(guard);
+            int fall = nextAt[b];
+            if (exit < fall)
+                continue;
+            std::vector<int> condJumps;
+            condJumps.push_back(guard);
+            for (int scan = prevOf(guard); scan >= 0; scan = prevOf(scan)) {
+                int op = opAt[scan];
+                if (isPopJump(op)) {
+                    int target = absJump(scan);
+                    if (target != exit && target != body)
+                        break;
+                    condJumps.push_back(scan);
+                    continue;
+                }
+                if (!isValue(op))
+                    break;
+            }
+            int first = condJumps.back();
+            whileGuardEnd[first] = absJump(first);
+            for (size_t i = 0; i + 1 < condJumps.size(); i++)
+                whileCondJumps.insert(condJumps[i]);
+            whileBackedges.insert(b);
+            for (int scan = prevOf(b); scan > body; scan = prevOf(scan)) {
+                int op = opAt[scan];
+                if (isPopJump(op)) {
+                    int target = absJump(scan);
+                    if (target == body || target == exit || target >= fall)
+                        whileLatchGuards.insert(scan);
+                    else
+                        break;
+                    continue;
+                }
+                if (!isValue(op))
+                    break;
+            }
+            if (exit > fall && duplicateExit(fall, exit))
+                whileDupSkip[b] = exit;
+            // A jump from the body past the fall-through is a break over the else clause
+            if (exit == fall) {
+                int elseEnd = -1;
+                for (int p : order) {
+                    if (p < body || p >= b)
+                        continue;
+                    int op = opAt[p];
+                    int target = -1;
+                    if (op == Pyc::JUMP_ABSOLUTE_A)
+                        target = absJump(p);
+                    else if (op == Pyc::JUMP_FORWARD_A)
+                        target = ast_relative_jump_target(mod, op, operAt[p], nextAt[p], false);
+                    if (target > exit && (elseEnd < 0 || target < elseEnd))
+                        elseEnd = target;
+                }
+                if (elseEnd > exit)
+                    whileElseAt[b] = elseEnd;
             }
         }
         return;
@@ -2377,6 +2520,9 @@ static void ScanInfiniteLoops(PycRef<PycCode> code, PycModule* mod,
     for (int b : whileBackedges) {
         if (opAt.count(b) && (opAt[b] == Pyc::JUMP_ABSOLUTE_A || opAt[b] == Pyc::JUMP_BACKWARD_A))
             heads.insert(backTarget(b));
+        else if (opAt.count(b) && mod->verCompare(3, 10) == 0
+                && (opAt[b] == Pyc::POP_JUMP_IF_TRUE_A || opAt[b] == Pyc::POP_JUMP_IF_FALSE_A))
+            heads.insert(operAt[b] * (int)sizeof(uint16_t));
         else if (opAt.count(b))
             heads.insert(nextAt[b] - operAt[b] * 2);
     }
@@ -2518,6 +2664,48 @@ static void ScanChainedCompare(PycRef<PycCode> code, PycModule* mod,
     }
 }
 
+// Pop the repeated test and close the BLK_WHILE opened at its entry guard
+static bool ast_close_while_backedge(std::stack<PycRef<ASTBlock> >& blocks,
+        PycRef<ASTBlock>& curblock, FastStack& stack,
+        const std::map<int, int>& whileDupSkip, int& curpos,
+        PycBuffer& source, PycModule* mod, int& opcode, int& operand, int& pos)
+{
+    bool hasWhile = false;
+    {
+        std::stack<PycRef<ASTBlock> > tmp = blocks;
+        while (!tmp.empty()) {
+            if (tmp.top()->blktype() == ASTBlock::BLK_WHILE) {
+                hasWhile = true;
+                break;
+            }
+            tmp.pop();
+        }
+    }
+    if (!hasWhile)
+        return false;
+    if (!stack.empty())
+        stack.pop();
+    // Close blocks still open inside the loop body, then the BLK_WHILE itself
+    while (blocks.size() > 1 && curblock->blktype() != ASTBlock::BLK_WHILE) {
+        PycRef<ASTBlock> inner = curblock;
+        blocks.pop();
+        curblock = blocks.top();
+        curblock->append(inner.cast<ASTNode>());
+    }
+    if (curblock->blktype() == ASTBlock::BLK_WHILE && blocks.size() > 1) {
+        PycRef<ASTBlock> wh = curblock;
+        blocks.pop();
+        curblock = blocks.top();
+        curblock->append(wh.cast<ASTNode>());
+    }
+    std::map<int, int>::const_iterator dup = whileDupSkip.find(curpos);
+    while (dup != whileDupSkip.end() && pos < dup->second && !source.atEof()) {
+        curpos = pos;
+        bc_next(source, mod, opcode, operand, pos);
+    }
+    return true;
+}
+
 PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
 {
     const bool py313ClassBody = mod->verCompare(3, 13) >= 0
@@ -2605,6 +2793,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
     std::set<int> whileLatchGuards;             /* repeated bottom tests */
     std::map<int, int> whileInvertedGuards;     // entry guard jumping into the body -> body start
     std::map<int, int> whileDupSkip;            // back-edge -> end of the duplicated exit block after it
+    std::set<int> whileCondJumps;               // 3.10 header jumps that extend the while condition
+    std::map<int, int> whileElseAt;             // 3.10 back-edge -> end of the else body
     std::map<int, int> whileTrueAt;             // `while True:` head -> loop exit
     std::map<int, std::pair<PycRef<ASTBlock>, int> > elifElseEnd;  // elif end -> (elif, end of the else it replaced)
 
@@ -2762,12 +2952,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 inlineCompSavedByStart, inlineCompSyntheticTargets,
                 inlineCompSkipByTarget, inlineCompRestoreStores);
         ScanWhileLoops(code, mod, whileGuardEnd, whileBackedges,
-                       whileLatchGuards, whileInvertedGuards, whileDupSkip);
+                       whileLatchGuards, whileInvertedGuards, whileDupSkip,
+                       whileCondJumps, whileElseAt);
         ScanInfiniteLoops(code, mod, exception_entries, whileBackedges, whileTrueAt);
         ScanChainedCompare(code, mod, chainSkipJumps, trampolineExit);
     } else if (mod->verCompare(3, 8) >= 0) {
         ScanWhileLoops(code, mod, whileGuardEnd, whileBackedges,
-                       whileLatchGuards, whileInvertedGuards, whileDupSkip);
+                       whileLatchGuards, whileInvertedGuards, whileDupSkip,
+                       whileCondJumps, whileElseAt);
         ScanInfiniteLoops(code, mod, exception_entries, whileBackedges, whileTrueAt);
     }
 
@@ -5126,6 +5318,21 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         stack.pop();
                     break;
                 }
+                // 3.10 backward POP_JUMP_IF_* that ScanWhileLoops recorded closes the loop
+                if (mod->verCompare(3, 10) == 0 && whileBackedges.count(curpos)) {
+                    if (ast_close_while_backedge(blocks, curblock, stack, whileDupSkip,
+                            curpos, source, mod, opcode, operand, pos)) {
+                        std::map<int, int>::iterator el = whileElseAt.find(curpos);
+                        if (el != whileElseAt.end() && el->second > pos) {
+                            stack_hist.push(stack);
+                            PycRef<ASTBlock> elseblk = new ASTBlock(ASTBlock::BLK_ELSE, el->second);
+                            elseblk->init();
+                            blocks.push(elseblk);
+                            curblock = blocks.top();
+                        }
+                        break;
+                    }
+                }
                 // 3.9-3.10 JUMP_IF_NOT_EXC_MATCH pops the type and the exception, like COMPARE_OP exception match + POP_JUMP_IF_FALSE
                 if (opcode == Pyc::JUMP_IF_NOT_EXC_MATCH_A) {
                     PycRef<ASTNode> excType = stack.top();
@@ -5139,6 +5346,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                    closes it. */
                 auto wit = whileGuardEnd.find(curpos);
                 if (wit != whileGuardEnd.end()) {
+                    if (stack.empty()) {
+                        cleanBuild = false;
+                        break;
+                    }
                     PycRef<ASTNode> wcond = stack.top();
                     stack.pop();
                     bool wneg = false;
@@ -5177,6 +5388,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 // `if cond: break` folded into one conditional jump to the while exit
                 if (mod->verCompare(3, 8) >= 0 && cond != nullptr && opcode != Pyc::JUMP_IF_FALSE_OR_POP_A
                         && opcode != Pyc::JUMP_IF_TRUE_OR_POP_A && opcode != Pyc::JUMP_IF_NOT_EXC_MATCH_A
+                        && !whileCondJumps.count(curpos)
                         && !(stack.size() >= 2 && stack.top(2) == cond)) {
                     bool relative = mod->verCompare(3, 12) >= 0 || opcode == Pyc::POP_JUMP_FORWARD_IF_FALSE_A
                             || opcode == Pyc::POP_JUMP_FORWARD_IF_TRUE_A || opcode == Pyc::POP_JUMP_FORWARD_IF_NONE_A
@@ -5592,46 +5804,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                    BLK_WHILE opened at the matching entry guard. Only act when a
                    BLK_WHILE is actually open (guard against a misidentified
                    back-edge collapsing the whole block stack). */
-                if (whileBackedges.count(curpos)) {
-                    bool hasWhile = false;
-                    {
-                        std::stack<PycRef<ASTBlock> > tmp = blocks;
-                        while (!tmp.empty()) {
-                            if (tmp.top()->blktype() == ASTBlock::BLK_WHILE) {
-                                hasWhile = true;
-                                break;
-                            }
-                            tmp.pop();
-                        }
-                    }
-                    if (hasWhile) {
-                        if (!stack.empty())
-                            stack.pop();
-                        /* Close any blocks still open inside the loop body, then
-                           the BLK_WHILE itself. */
-                        while (blocks.size() > 1
-                               && curblock->blktype() != ASTBlock::BLK_WHILE) {
-                            PycRef<ASTBlock> inner = curblock;
-                            blocks.pop();
-                            curblock = blocks.top();
-                            curblock->append(inner.cast<ASTNode>());
-                        }
-                        if (curblock->blktype() == ASTBlock::BLK_WHILE
-                                && blocks.size() > 1) {
-                            PycRef<ASTBlock> wh = curblock;
-                            blocks.pop();
-                            curblock = blocks.top();
-                            curblock->append(wh.cast<ASTNode>());
-                        }
-                        // Skip the duplicated exit block placed after the back-edge
-                        auto dup = whileDupSkip.find(curpos);
-                        while (dup != whileDupSkip.end() && pos < dup->second && !source.atEof()) {
-                            curpos = pos;
-                            bc_next(source, mod, opcode, operand, pos);
-                        }
-                        break;
-                    }
-                }
+                if (whileBackedges.count(curpos)
+                        && ast_close_while_backedge(blocks, curblock, stack, whileDupSkip,
+                                curpos, source, mod, opcode, operand, pos))
+                    break;
 
                 /* Python 3.11: conditional jump backwards. In compiled loops
                    this implements an in-body guard ("if cond: <rest of body>")

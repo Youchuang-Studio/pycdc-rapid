@@ -1,0 +1,203 @@
+x = 1 <EOL>
+a = 1 <EOL>
+b = 1 <EOL>
+t = 3 <EOL>
+while x : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+while t > 10 : <EOL>
+<INDENT>
+t = 1 <EOL>
+<OUTDENT>
+while not x : <EOL>
+<INDENT>
+x = 0 <EOL>
+<OUTDENT>
+while a and b : <EOL>
+<INDENT>
+a = 0 <EOL>
+<OUTDENT>
+while a or b : <EOL>
+<INDENT>
+a = 0 <EOL>
+<OUTDENT>
+while t : <EOL>
+<INDENT>
+if t > 2 : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+t = t + 1 <EOL>
+while t : <EOL>
+<INDENT>
+t = t - 1 <EOL>
+if t == 1 : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+while t : <EOL>
+<INDENT>
+if t > 3 : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+t = 9 <EOL>
+<OUTDENT>
+t = t + 1 <EOL>
+while t : <EOL>
+<INDENT>
+while t > 1 : <EOL>
+<INDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+t = 0 <EOL>
+<OUTDENT>
+while True : <EOL>
+<INDENT>
+t = t + 1 <EOL>
+if t > 3 : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+<OUTDENT>
+t = t + 1 <EOL>
+while t : <EOL>
+<INDENT>
+if t > 1 : <EOL>
+<INDENT>
+t = 1 <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+t = 0 <EOL>
+<OUTDENT>
+<OUTDENT>
+def f ( t ) : <EOL>
+<INDENT>
+while t > 10 : <EOL>
+<INDENT>
+t = 1 <EOL>
+<OUTDENT>
+<OUTDENT>
+def f_pass ( x ) : <EOL>
+<INDENT>
+while x : <EOL>
+<INDENT>
+pass <EOL>
+<OUTDENT>
+<OUTDENT>
+def f_not ( x ) : <EOL>
+<INDENT>
+while not x : <EOL>
+<INDENT>
+x = 0 <EOL>
+<OUTDENT>
+return x <EOL>
+<OUTDENT>
+def f_and ( a , b ) : <EOL>
+<INDENT>
+while a and b : <EOL>
+<INDENT>
+a = 0 <EOL>
+<OUTDENT>
+return a <EOL>
+<OUTDENT>
+def f_or ( a , b ) : <EOL>
+<INDENT>
+while a or b : <EOL>
+<INDENT>
+a = 0 <EOL>
+<OUTDENT>
+return a <EOL>
+<OUTDENT>
+def f_break ( t ) : <EOL>
+<INDENT>
+while t : <EOL>
+<INDENT>
+if t > 2 : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+t = t + 1 <EOL>
+return t <EOL>
+<OUTDENT>
+def f_cont ( t ) : <EOL>
+<INDENT>
+while t : <EOL>
+<INDENT>
+t = t - 1 <EOL>
+if t == 1 : <EOL>
+<INDENT>
+continue <EOL>
+<OUTDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+return t <EOL>
+<OUTDENT>
+def f_else ( t ) : <EOL>
+<INDENT>
+while t : <EOL>
+<INDENT>
+if t > 3 : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+t = 9 <EOL>
+<OUTDENT>
+t = t + 1 <EOL>
+return t <EOL>
+<OUTDENT>
+def f_nest ( t ) : <EOL>
+<INDENT>
+while t : <EOL>
+<INDENT>
+while t > 1 : <EOL>
+<INDENT>
+t = t - 1 <EOL>
+<OUTDENT>
+t = 0 <EOL>
+<OUTDENT>
+return t <EOL>
+<OUTDENT>
+def f_true ( n ) : <EOL>
+<INDENT>
+while True : <EOL>
+<INDENT>
+n = n + 1 <EOL>
+if n > 3 : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+<OUTDENT>
+n = n + 1 <EOL>
+return n <EOL>
+<OUTDENT>
+def f_if ( t ) : <EOL>
+<INDENT>
+while t : <EOL>
+<INDENT>
+if t > 1 : <EOL>
+<INDENT>
+t = 1 <EOL>
+<OUTDENT>
+else : <EOL>
+<INDENT>
+t = 0 <EOL>
+<OUTDENT>
+<OUTDENT>
+return t <EOL>
