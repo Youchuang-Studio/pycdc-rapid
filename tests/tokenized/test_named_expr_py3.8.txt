@@ -1,0 +1,38 @@
+def f_if ( q ) : <EOL>
+<INDENT>
+if ( x := q . get ( ) ) : <EOL>
+<INDENT>
+return x <EOL>
+<OUTDENT>
+return 0 <EOL>
+<OUTDENT>
+def f_while ( q ) : <EOL>
+<INDENT>
+while ( x := q . get ( ) ) : <EOL>
+<INDENT>
+g ( x ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def f_cmp ( ) : <EOL>
+<INDENT>
+while ( z := h ( ) ) > 3 : <EOL>
+<INDENT>
+g ( z ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def f_call ( ) : <EOL>
+<INDENT>
+return g ( ( x := h ( ) ) ) <EOL>
+<OUTDENT>
+def f_nested ( ) : <EOL>
+<INDENT>
+return ( y := ( x := 1 ) ) <EOL>
+<OUTDENT>
+def f_comp ( xs ) : <EOL>
+<INDENT>
+return [ y for y in xs if ( z := y ) ] <EOL>
+<OUTDENT>
+def f_chain ( c ) : <EOL>
+<INDENT>
+a = b = c <EOL>
+return a <EOL>

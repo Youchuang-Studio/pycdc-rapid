@@ -88,12 +88,15 @@ private:
 class ASTChainStore : public ASTNodeList {
 public:
     ASTChainStore(list_t nodes, PycRef<ASTNode> src)
-        : ASTNodeList(nodes, NODE_CHAINSTORE), m_src(std::move(src)) { }
-    
+        : ASTNodeList(nodes, NODE_CHAINSTORE), m_src(std::move(src)), m_expr(false) { }
+
     PycRef<ASTNode> src() const { return m_src; }
+    bool expression() const { return m_expr; }
+    void setExpression(bool expr) { m_expr = expr; }
 
 private:
     PycRef<ASTNode> m_src;
+    bool m_expr;
 };
 
 
