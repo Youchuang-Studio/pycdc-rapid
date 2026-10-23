@@ -201,3 +201,77 @@ t = 0 <EOL>
 <OUTDENT>
 <OUTDENT>
 return t <EOL>
+<OUTDENT>
+def f_try_break ( p ) : <EOL>
+<INDENT>
+while p : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( p ) <EOL>
+break <EOL>
+<OUTDENT>
+except E : <EOL>
+<INDENT>
+p . pop ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+return p <EOL>
+<OUTDENT>
+def f_try_finally ( n ) : <EOL>
+<INDENT>
+while n : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+if g ( n ) : <EOL>
+<INDENT>
+break <EOL>
+<OUTDENT>
+<OUTDENT>
+finally : <EOL>
+<INDENT>
+h ( ) <EOL>
+<OUTDENT>
+n = n - 1 <EOL>
+<OUTDENT>
+return n <EOL>
+<OUTDENT>
+def f_load_name ( name , module ) : <EOL>
+<INDENT>
+parts = name . split ( '.' ) <EOL>
+parts_copy = parts [ : ] <EOL>
+while parts_copy : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+module_name = '.' . join ( parts_copy ) <EOL>
+module = __import__ ( module_name ) <EOL>
+break <EOL>
+<OUTDENT>
+except ImportError : <EOL>
+<INDENT>
+next_attribute = parts_copy . pop ( ) <EOL>
+if not parts_copy : <EOL>
+<INDENT>
+return next_attribute <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return module <EOL>
+<OUTDENT>
+def f_lambda ( xs ) : <EOL>
+<INDENT>
+while a and sorted ( xs , key = ( lambda v : v ) ) : <EOL>
+<INDENT>
+xs = g ( xs ) <EOL>
+<OUTDENT>
+return xs <EOL>
+<OUTDENT>
+def f_star ( xs ) : <EOL>
+<INDENT>
+while a and [ 1 , * xs ] : <EOL>
+<INDENT>
+xs = g ( xs ) <EOL>
+<OUTDENT>
+return xs <EOL>

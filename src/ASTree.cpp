@@ -2128,29 +2128,35 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
         auto absJump = [&](int p) {
             return operAt[p] * (int)sizeof(uint16_t);
         };
-        auto isValue = [](int op) {
-            return op == Pyc::LOAD_FAST_A || op == Pyc::LOAD_NAME_A || op == Pyc::LOAD_GLOBAL_A
-                || op == Pyc::LOAD_CONST_A || op == Pyc::LOAD_DEREF_A || op == Pyc::LOAD_CLASSDEREF_A
-                || op == Pyc::LOAD_ATTR_A || op == Pyc::LOAD_METHOD_A || op == Pyc::LOAD_CLOSURE_A
-                || op == Pyc::BINARY_SUBSCR || op == Pyc::COMPARE_OP_A || op == Pyc::IS_OP_A
-                || op == Pyc::CONTAINS_OP_A || op == Pyc::UNARY_POSITIVE || op == Pyc::UNARY_NEGATIVE
-                || op == Pyc::UNARY_NOT || op == Pyc::UNARY_INVERT
-                || op == Pyc::BINARY_POWER || op == Pyc::BINARY_MULTIPLY || op == Pyc::BINARY_MODULO
-                || op == Pyc::BINARY_ADD || op == Pyc::BINARY_SUBTRACT || op == Pyc::BINARY_LSHIFT
-                || op == Pyc::BINARY_RSHIFT || op == Pyc::BINARY_AND || op == Pyc::BINARY_XOR
-                || op == Pyc::BINARY_OR || op == Pyc::BINARY_FLOOR_DIVIDE || op == Pyc::BINARY_TRUE_DIVIDE
-                || op == Pyc::BINARY_MATRIX_MULTIPLY
-                || op == Pyc::INPLACE_POWER || op == Pyc::INPLACE_MULTIPLY || op == Pyc::INPLACE_MODULO
-                || op == Pyc::INPLACE_ADD || op == Pyc::INPLACE_SUBTRACT || op == Pyc::INPLACE_LSHIFT
-                || op == Pyc::INPLACE_RSHIFT || op == Pyc::INPLACE_AND || op == Pyc::INPLACE_XOR
-                || op == Pyc::INPLACE_OR || op == Pyc::INPLACE_FLOOR_DIVIDE || op == Pyc::INPLACE_TRUE_DIVIDE
-                || op == Pyc::INPLACE_MATRIX_MULTIPLY
-                || op == Pyc::DUP_TOP || op == Pyc::DUP_TOP_TWO || op == Pyc::ROT_TWO
-                || op == Pyc::ROT_THREE || op == Pyc::ROT_FOUR || op == Pyc::ROT_N_A
-                || op == Pyc::BUILD_TUPLE_A || op == Pyc::BUILD_LIST_A || op == Pyc::BUILD_SET_A
-                || op == Pyc::BUILD_MAP_A || op == Pyc::BUILD_CONST_KEY_MAP_A || op == Pyc::BUILD_STRING_A
-                || op == Pyc::BUILD_SLICE_A || op == Pyc::CALL_FUNCTION_A || op == Pyc::CALL_FUNCTION_KW_A
-                || op == Pyc::CALL_FUNCTION_EX_A || op == Pyc::CALL_METHOD_A || op == Pyc::FORMAT_VALUE_A;
+        // Stop the condition walk at a statement, not at an unrecognized expression opcode
+        auto isBoundary = [](int op) {
+            return op == Pyc::POP_TOP || op == Pyc::STORE_NAME_A || op == Pyc::STORE_FAST_A
+                || op == Pyc::STORE_GLOBAL_A || op == Pyc::STORE_DEREF_A || op == Pyc::STORE_ATTR_A
+                || op == Pyc::STORE_SUBSCR || op == Pyc::STORE_ANNOTATION_A
+                || op == Pyc::DELETE_NAME_A || op == Pyc::DELETE_FAST_A || op == Pyc::DELETE_GLOBAL_A
+                || op == Pyc::DELETE_ATTR_A || op == Pyc::DELETE_SUBSCR || op == Pyc::DELETE_DEREF_A
+                || op == Pyc::RETURN_VALUE || op == Pyc::RAISE_VARARGS_A
+                || op == Pyc::RERAISE || op == Pyc::RERAISE_A
+                || op == Pyc::POP_BLOCK || op == Pyc::POP_EXCEPT
+                || op == Pyc::SETUP_FINALLY_A || op == Pyc::SETUP_WITH_A || op == Pyc::SETUP_ASYNC_WITH_A
+                || op == Pyc::SETUP_EXCEPT_A || op == Pyc::JUMP_FORWARD_A || op == Pyc::JUMP_ABSOLUTE_A
+                || op == Pyc::JUMP_IF_NOT_EXC_MATCH_A || op == Pyc::JUMP_IF_FALSE_OR_POP_A
+                || op == Pyc::JUMP_IF_TRUE_OR_POP_A || op == Pyc::FOR_ITER_A || op == Pyc::GET_ITER
+                || op == Pyc::YIELD_VALUE || op == Pyc::YIELD_FROM || op == Pyc::PRINT_EXPR
+                || op == Pyc::IMPORT_STAR;
+        };
+        std::set<int> jumpTargets;
+        for (int p : order) {
+            int op = opAt[p];
+            int target = -1;
+            if (isPopJump(op) || op == Pyc::JUMP_ABSOLUTE_A || op == Pyc::JUMP_IF_NOT_EXC_MATCH_A
+                    || op == Pyc::JUMP_IF_FALSE_OR_POP_A || op == Pyc::JUMP_IF_TRUE_OR_POP_A)
+                target = absJump(p);
+            else if (op == Pyc::JUMP_FORWARD_A || op == Pyc::SETUP_FINALLY_A || op == Pyc::SETUP_WITH_A
+                    || op == Pyc::SETUP_EXCEPT_A || op == Pyc::SETUP_ASYNC_WITH_A || op == Pyc::FOR_ITER_A)
+                target = ast_relative_jump_target(mod, op, operAt[p], nextAt[p], false);
+            if (target >= 0)
+                jumpTargets.insert(target);
         };
         std::map<int, int> indexOf;
         for (size_t i = 0; i < order.size(); i++)
@@ -2208,6 +2214,8 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
             std::vector<int> condJumps;
             condJumps.push_back(guard);
             for (int scan = prevOf(guard); scan >= 0; scan = prevOf(scan)) {
+                if (jumpTargets.count(scan))
+                    break;
                 int op = opAt[scan];
                 if (isPopJump(op)) {
                     int target = absJump(scan);
@@ -2216,7 +2224,7 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                     condJumps.push_back(scan);
                     continue;
                 }
-                if (!isValue(op))
+                if (isBoundary(op))
                     break;
             }
             int first = condJumps.back();
@@ -2234,7 +2242,7 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                         break;
                     continue;
                 }
-                if (!isValue(op))
+                if (isBoundary(op))
                     break;
             }
             if (exit > fall && duplicateExit(fall, exit))
@@ -2664,6 +2672,67 @@ static void ScanChainedCompare(PycRef<PycCode> code, PycModule* mod,
     }
 }
 
+// Length of a 3.10 while-exit block small enough for CPython to copy (at most 4 instructions)
+static int ast_py310_exit_block_len(PycRef<PycCode> code, PycModule* mod, int at)
+{
+    int codeLen = code->code() != nullptr ? code->code()->length() : 0;
+    if (at < 0 || at >= codeLen)
+        return 0;
+    int op = 0, arg = 0, next = at, end = at;
+    for (int n = 0; n < 4; n++) {
+        if (!ast_read_wordcode_instr(code->code(), mod, next, op, arg, next))
+            break;
+        end = next;
+        if (op == Pyc::RETURN_VALUE || op == Pyc::RETURN_CONST_A || op == Pyc::RAISE_VARARGS_A
+                || op == Pyc::RERAISE || op == Pyc::RERAISE_A
+                || op == Pyc::JUMP_ABSOLUTE_A || op == Pyc::JUMP_FORWARD_A)
+            return end - at;
+    }
+    return 0;
+}
+
+// 3.10 break inside try: after POP_BLOCK, an inlined finally, then a jump to the while
+// exit or a byte-for-byte copy of that exit. Returns the offset just past that break.
+static int ast_py310_while_break_end(PycRef<PycCode> code, PycModule* mod,
+        std::stack<PycRef<ASTBlock> > blocks, const std::set<int>& skip, int afterPop)
+{
+    int whileEnd = 0;
+    bool inTry = false;
+    while (!blocks.empty()) {
+        int kind = blocks.top()->blktype();
+        if (kind == ASTBlock::BLK_TRY)
+            inTry = true;
+        else if (kind == ASTBlock::BLK_FINALLY || kind == ASTBlock::BLK_EXCEPT)
+            return -1;
+        else if (kind == ASTBlock::BLK_FOR || kind == ASTBlock::BLK_ASYNCFOR)
+            return -1;
+        else if (kind == ASTBlock::BLK_WHILE && whileEnd == 0)
+            whileEnd = blocks.top()->end();
+        blocks.pop();
+    }
+    int codeLen = code->code() != nullptr ? code->code()->length() : 0;
+    if (!inTry || whileEnd <= afterPop || whileEnd >= codeLen || code->code() == nullptr)
+        return -1;
+    int op = 0, arg = 0, next = afterPop, at = afterPop;
+    while (at < codeLen && skip.count(at)
+            && ast_read_wordcode_instr(code->code(), mod, at, op, arg, next))
+        at = next;
+    if (!ast_read_wordcode_instr(code->code(), mod, at, op, arg, next))
+        return -1;
+    int target = -1;
+    if (op == Pyc::JUMP_ABSOLUTE_A)
+        target = arg * (int)sizeof(uint16_t);
+    else if (op == Pyc::JUMP_FORWARD_A)
+        target = ast_relative_jump_target(mod, op, arg, next, false);
+    if (target >= whileEnd)
+        return next;
+    int elen = ast_py310_exit_block_len(code, mod, whileEnd);
+    if (elen > 0 && at + elen <= codeLen
+            && memcmp(code->code()->value() + at, code->code()->value() + whileEnd, elen) == 0)
+        return at + elen;
+    return -1;
+}
+
 // Pop the repeated test and close the BLK_WHILE opened at its entry guard
 static bool ast_close_while_backedge(std::stack<PycRef<ASTBlock> >& blocks,
         PycRef<ASTBlock>& curblock, FastStack& stack,
@@ -3038,6 +3107,22 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             continue;
         }
         if (exceptAsSkip.count(pos) || finallyCopySkip.count(pos)) {
+            // 3.10 copies a while exit after POP_BLOCK and an inlined finally; that is still a break
+            if (mod->verCompare(3, 10) == 0) {
+                int breakOp = 0, breakArg = 0, afterPop = 0;
+                if (ast_read_wordcode_instr(code->code(), mod, pos, breakOp, breakArg, afterPop)
+                        && breakOp == Pyc::POP_BLOCK) {
+                    int breakEnd = ast_py310_while_break_end(code, mod, blocks, exceptAsSkip, afterPop);
+                    if (breakEnd > afterPop) {
+                        curblock->append(new ASTKeyword(ASTKeyword::KW_BREAK));
+                        while (pos < breakEnd && !source.atEof()) {
+                            curpos = pos;
+                            bc_next(source, mod, opcode, operand, pos);
+                        }
+                        continue;
+                    }
+                }
+            }
             curpos = pos;
             bc_next(source, mod, opcode, operand, pos);
             continue;
@@ -7078,6 +7163,18 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             break;
         case Pyc::POP_BLOCK:
             {
+                // 3.10 break in a try: POP_BLOCK then a jump to the while exit, or a copy of that exit
+                if (mod->verCompare(3, 10) == 0) {
+                    int breakEnd = ast_py310_while_break_end(code, mod, blocks, exceptAsSkip, pos);
+                    if (breakEnd > pos) {
+                        curblock->append(new ASTKeyword(ASTKeyword::KW_BREAK));
+                        while (pos < breakEnd && !source.atEof()) {
+                            curpos = pos;
+                            bc_next(source, mod, opcode, operand, pos);
+                        }
+                        break;
+                    }
+                }
                 // Early exit from a try body (POP_BLOCK; continue/break/return): only the exit right before the handler ends the try
                 PycRef<ASTBlock> ownerTry;
                 {
