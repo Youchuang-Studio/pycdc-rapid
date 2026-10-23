@@ -737,13 +737,15 @@ private:
 
 class ASTAwaitable : public ASTNode {
 public:
-    ASTAwaitable(PycRef<ASTNode> expr)
-        : ASTNode(NODE_AWAITABLE), m_expr(std::move(expr)) { }
+    ASTAwaitable(PycRef<ASTNode> expr, bool yieldFrom = false)
+        : ASTNode(NODE_AWAITABLE), m_expr(std::move(expr)), m_yieldFrom(yieldFrom) { }
 
     PycRef<ASTNode> expression() const { return m_expr; }
+    bool yieldFrom() const { return m_yieldFrom; }
 
 private:
     PycRef<ASTNode> m_expr;
+    bool m_yieldFrom;
 };
 
 class ASTFormattedValue : public ASTNode {

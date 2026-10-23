@@ -1,0 +1,44 @@
+async def f_await ( x ) : <EOL>
+<INDENT>
+await x <EOL>
+<OUTDENT>
+async def f_assign ( x ) : <EOL>
+<INDENT>
+y = await x <EOL>
+return y <EOL>
+<OUTDENT>
+async def f_ret ( x ) : <EOL>
+<INDENT>
+return await x <EOL>
+<OUTDENT>
+async def f_arg ( x ) : <EOL>
+<INDENT>
+return g ( await x ) <EOL>
+<OUTDENT>
+async def f_nested ( ) : <EOL>
+<INDENT>
+return h ( await g ( ) ) <EOL>
+<OUTDENT>
+async def f_if ( x ) : <EOL>
+<INDENT>
+if await x : <EOL>
+<INDENT>
+return 1 <EOL>
+<OUTDENT>
+return 0 <EOL>
+<OUTDENT>
+async def f_while ( q ) : <EOL>
+<INDENT>
+while await q . more ( ) : <EOL>
+<INDENT>
+await q . step ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+def f_yield ( g ) : <EOL>
+<INDENT>
+yield from g <EOL>
+<OUTDENT>
+def f_yield_assign ( g ) : <EOL>
+<INDENT>
+x = yield from g <EOL>
+return x <EOL>

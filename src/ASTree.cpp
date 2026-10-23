@@ -1153,6 +1153,45 @@ static PycRef<ASTComprehension> SynthGenexpr(PycRef<ASTNode> node)
     return NULL;
 }
 
+static bool ast_is_comp_code(PycRef<PycCode> code)
+{
+    if (code == nullptr || code->name() == nullptr)
+        return false;
+    const char* cn = code->name()->value();
+    return cn && (!strcmp(cn, "<listcomp>") || !strcmp(cn, "<setcomp>")
+            || !strcmp(cn, "<dictcomp>") || !strcmp(cn, "<genexpr>"));
+}
+
+// Next non-cache instruction is `want`. NOT_TAKEN is a 3.13+ hint, not an operation.
+static bool ast_next_real_is(PycRef<PycCode> code, PycModule* mod, int at, int want)
+{
+    int op = 0, arg = 0, next = 0;
+    while (code != nullptr && code->code() != nullptr
+            && ast_read_wordcode_instr(code->code(), mod, at, op, arg, next)) {
+        if (op == Pyc::CACHE || op == Pyc::NOP || op == Pyc::NOT_TAKEN
+                || op == Pyc::INSTRUMENTED_NOT_TAKEN_A)
+            at = next;
+        else
+            return op == want;
+    }
+    return false;
+}
+
+// Offset of the async-for terminator, or the end of the code object if it is absent.
+static int ast_async_for_end(PycRef<PycCode> code, PycModule* mod, int at)
+{
+    int end = code != nullptr && code->code() != nullptr ? code->code()->length() : at;
+    int op = 0, arg = 0, next = 0;
+    while (code != nullptr && code->code() != nullptr
+            && ast_read_wordcode_instr(code->code(), mod, at, op, arg, next)) {
+        if (op == Pyc::END_ASYNC_FOR || op == Pyc::END_ASYNC_FOR_A
+                || op == Pyc::INSTRUMENTED_END_ASYNC_FOR_A)
+            return at;
+        at = next;
+    }
+    return end;
+}
+
 // A comprehension code object called with its iterable: rebuild the comprehension with .0 replaced by that iterable
 static PycRef<ASTNode> ast_inline_comprehension(PycRef<ASTNode> func, PycRef<ASTNode> iter, PycModule* mod)
 {
@@ -3474,6 +3513,16 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             const auto& entry = exception_entries[next_exception_entry];
             if (entry.start_offset == pos
                     && !entry.push_lasti) {
+                // SEND's StopIteration edge is not a source try
+                int topOp = 0, topArg = 0, topNext = 0;
+                bool awaitCleanup = code->code() != nullptr
+                        && ast_read_wordcode_instr(code->code(), mod, entry.target, topOp, topArg, topNext)
+                        && (topOp == Pyc::CLEANUP_THROW || topOp == Pyc::CALL_INTRINSIC_1_A
+                            || topOp == Pyc::END_ASYNC_FOR || topOp == Pyc::END_ASYNC_FOR_A
+                            || topOp == Pyc::INSTRUMENTED_END_ASYNC_FOR_A);
+                if (awaitCleanup) {
+                    next_exception_entry++;
+                } else {
                 auto fit = finallyTryEndByStart.find(entry.start_offset);
                 bool finallyConsumed = false;
                 if (fit != finallyTryEndByStart.end()) {
@@ -3599,6 +3648,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         curblock = blocks.top();
                         next_exception_entry++;
                     }
+                }
                 }
             }
         }
@@ -5244,23 +5294,84 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             break;
         case Pyc::GET_AITER:
             {
-                // Logic similar to FOR_ITER_A
-                PycRef<ASTNode> iter = stack.top(); // Iterable
-                stack.pop();
-
-                PycRef<ASTBlock> top = blocks.top();
-                if (top->blktype() == ASTBlock::BLK_WHILE) {
+                if (mod->verCompare(3, 11) < 0) {
+                    PycRef<ASTNode> iter = stack.empty() ? nullptr : stack.top();
+                    if (!stack.empty())
+                        stack.pop();
+                    PycRef<ASTBlock> top = blocks.top();
+                    if (top->blktype() == ASTBlock::BLK_WHILE) {
+                        blocks.pop();
+                        PycRef<ASTIterBlock> forblk = new ASTIterBlock(ASTBlock::BLK_ASYNCFOR, curpos, top->end(), iter);
+                        blocks.push(forblk.cast<ASTBlock>());
+                        curblock = blocks.top();
+                        stack.push(nullptr);
+                    } else {
+                        fprintf(stderr, "Unsupported use of GET_AITER outside of SETUP_LOOP\n");
+                    }
+                    break;
+                }
+                // Statement form is GET_AITER immediately followed by GET_ANEXT.
+                // A call consumes the iterator as an async-comp argument, and an
+                // inlined comp (3.12-3.14) starts the loop at a later GET_ANEXT.
+                if (!ast_next_real_is(code, mod, pos, Pyc::GET_ANEXT))
+                    break;
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
+                }
+                PycRef<ASTNode> iter = stack.top();
+                int anext = pos;
+                int op = 0, arg = 0, next = 0, at = pos;
+                while (code->code() != nullptr
+                        && ast_read_wordcode_instr(code->code(), mod, at, op, arg, next)) {
+                    if (op == Pyc::GET_ANEXT) {
+                        anext = at;
+                        break;
+                    }
+                    at = next;
+                }
+                bool comprehension = inlineCompActive || ast_is_comp_code(code);
+                if (blocks.size() > 1 && blocks.top()->blktype() == ASTBlock::BLK_WHILE)
                     blocks.pop();
-                    PycRef<ASTIterBlock> forblk = new ASTIterBlock(ASTBlock::BLK_ASYNCFOR, curpos, top->end(), iter);
-                    blocks.push(forblk.cast<ASTBlock>());
-                    curblock = blocks.top();
-                    stack.push(nullptr);
-                } else {
-                     fprintf(stderr, "Unsupported use of GET_AITER outside of SETUP_LOOP\n");
+                PycRef<ASTIterBlock> forblk = new ASTIterBlock(
+                        ASTBlock::BLK_ASYNCFOR, anext, ast_async_for_end(code, mod, pos), iter);
+                forblk->setComprehension(comprehension);
+                blocks.push(forblk.cast<ASTBlock>());
+                curblock = blocks.top();
+                if (comprehension && inlineCompActive)
+                    inlineCompMaxLoopDepth = std::max(inlineCompMaxLoopDepth, ++inlineCompLoopDepth);
+                // 3.12+ inline comps keep the iterator under the element placeholder, like FOR_ITER
+                if (comprehension && mod->verCompare(3, 12) >= 0)
+                    stack.push(NULL);
+                else {
+                    stack.pop();
+                    stack.push(iter);
                 }
             }
             break;
         case Pyc::GET_ANEXT:
+            // Loop head when GET_AITER was not the previous instruction (inlined comp, or a <listcomp> body)
+            if (mod->verCompare(3, 11) < 0
+                    || (curblock != nullptr && curblock->blktype() == ASTBlock::BLK_ASYNCFOR))
+                break;
+            if (stack.empty()) {
+                cleanBuild = false;
+                break;
+            }
+            {
+                PycRef<ASTNode> iter = stack.top();
+                bool comprehension = inlineCompActive || ast_is_comp_code(code);
+                if (mod->verCompare(3, 12) < 0)
+                    stack.pop();
+                PycRef<ASTIterBlock> forblk = new ASTIterBlock(
+                        ASTBlock::BLK_ASYNCFOR, curpos, ast_async_for_end(code, mod, pos), iter);
+                forblk->setComprehension(comprehension);
+                blocks.push(forblk.cast<ASTBlock>());
+                curblock = blocks.top();
+                if (comprehension && inlineCompActive)
+                    inlineCompMaxLoopDepth = std::max(inlineCompMaxLoopDepth, ++inlineCompLoopDepth);
+                stack.push(NULL);
+            }
             break;
         case Pyc::FORMAT_VALUE_A:
             {
@@ -5341,15 +5452,65 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             }
             break;
         case Pyc::GET_AWAITABLE:
+        case Pyc::GET_AWAITABLE_A:
             {
+                // 3.11+ operand selects await / aenter / aexit; the value is still the awaited expression
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
+                }
                 PycRef<ASTNode> object = stack.top();
                 stack.pop();
+                if (opcode == Pyc::GET_AWAITABLE_A && operand != 0) {
+                    fprintf(stderr, "Warning: async with protocol in %s (offset %d)\n",
+                            code->name() != nullptr ? code->name()->value() : "<unknown>", curpos);
+                    cleanBuild = false;
+                }
+                // The await around an async comprehension is the compiler's coroutine call, not source
+                if (object != nullptr && object.type() == ASTNode::NODE_COMPREHENSION) {
+                    stack.push(object);
+                    break;
+                }
                 stack.push(new ASTAwaitable(object));
             }
             break;
         case Pyc::GET_ITER:
+            {
+                // 3.15 yield from is GET_ITER; LOAD const; SEND, not GET_YIELD_FROM_ITER
+                if (mod->verCompare(3, 11) >= 0 && code->code() != nullptr && !stack.empty()) {
+                    int op = 0, arg = 0, next = 0, at = pos, steps = 0;
+                    bool yieldFrom = false;
+                    while (steps < 4 && ast_read_wordcode_instr(code->code(), mod, at, op, arg, next)) {
+                        if (op == Pyc::CACHE || op == Pyc::PUSH_NULL
+                                || op == Pyc::LOAD_CONST_A || op == Pyc::LOAD_COMMON_CONSTANT_A)
+                            at = next;
+                        else {
+                            yieldFrom = op == Pyc::SEND_A;
+                            break;
+                        }
+                        steps++;
+                    }
+                    if (yieldFrom) {
+                        PycRef<ASTNode> object = stack.top();
+                        stack.pop();
+                        stack.push(new ASTAwaitable(object, true));
+                    }
+                }
+            }
+            break;
         case Pyc::GET_YIELD_FROM_ITER:
-            /* We just entirely ignore this */
+            {
+                // 3.11+ has no YIELD_FROM opcode; the following SEND loop is the yield-from
+                if (mod->verCompare(3, 11) < 0)
+                    break;
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
+                }
+                PycRef<ASTNode> object = stack.top();
+                stack.pop();
+                stack.push(new ASTAwaitable(object, true));
+            }
             break;
         case Pyc::IMPORT_NAME_A:
             if (mod->majorVer() == 1) {
@@ -6197,7 +6358,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
                 }
                 if (offs < pos) {
-                    if (curblock->blktype() == ASTBlock::BLK_FOR) {
+                    if (curblock->blktype() == ASTBlock::BLK_FOR
+                            || (mod->verCompare(3, 11) >= 0
+                                && curblock->blktype() == ASTBlock::BLK_ASYNCFOR)) {
                         // offs is already absolute; a jump to the loop start at the body end closes the loop, earlier ones are continue
                         bool is_jump_to_start =
                                 offs == curblock.cast<ASTIterBlock>()->start();
@@ -6290,6 +6453,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                                     && inlineCompLoopDepth > 0) {
                                 inlineCompLoopDepth--;
                                 inlineCompCleanupOps = 2;
+                                // END_ASYNC_FOR is followed by SWAP/STORE of the saved local, not END_FOR/POP_TOP
+                                if (tmp->blktype() == ASTBlock::BLK_ASYNCFOR)
+                                    inlineCompCleanupOps = 0;
                                 if (inlineCompLoopDepth == 0
                                         && stack.top().type() == ASTNode::NODE_COMPREHENSION) {
                                     PycRef<ASTNode> comp = stack.top();
@@ -6847,13 +7013,19 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     stack.push(new ASTList(values));
                     break;
                 }
-                if (curblock->blktype() == ASTBlock::BLK_FOR
+                if ((curblock->blktype() == ASTBlock::BLK_FOR
+                            || curblock->blktype() == ASTBlock::BLK_ASYNCFOR)
                         && curblock.cast<ASTIterBlock>()->isComprehension()) {
                     stack.pop();
                     stack.push(new ASTComprehension(value));
                 } else {
                     const char* cn = code->name() != NULL ? code->name()->value() : NULL;
-                    if (cn && !strcmp(cn, "<listcomp>")) {
+                    if (curblock->blktype() == ASTBlock::BLK_ASYNCFOR) {
+                        fprintf(stderr, "Warning: async comprehension in %s could not be reconstructed (offset %d)\n",
+                                code->name() != nullptr ? code->name()->value() : "<unknown>", curpos);
+                        cleanBuild = false;
+                        stack.push(new ASTSubscr(list, value));
+                    } else if (cn && !strcmp(cn, "<listcomp>")) {
                         /* Filtered list comprehension: the append is inside the
                            filter block, so record the value as a yield-style
                            marker and let SynthGenexpr rebuild the comprehension
@@ -7235,8 +7407,34 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::NOT_TAKEN:
         case Pyc::INSTRUMENTED_NOT_TAKEN_A:
         case Pyc::TO_BOOL:
+            break;
+        case Pyc::END_ASYNC_FOR:
         case Pyc::END_ASYNC_FOR_A:
         case Pyc::INSTRUMENTED_END_ASYNC_FOR_A:
+            // Only the async-for terminator closes the loop; NOT_TAKEN sits between END_SEND and the store
+            if (mod->verCompare(3, 11) >= 0 && curblock->blktype() == ASTBlock::BLK_ASYNCFOR && blocks.size() > 1) {
+                PycRef<ASTIterBlock> loop = curblock.cast<ASTIterBlock>();
+                PycRef<ASTNode> idx = loop->index();
+                if (!loop->inited() || idx == nullptr || idx.type() == ASTNode::NODE_OBJECT) {
+                    fprintf(stderr, "Warning: async for in %s could not be reconstructed (offset %d)\n",
+                            code->name() != nullptr ? code->name()->value() : "<unknown>", curpos);
+                    cleanBuild = false;
+                }
+                blocks.pop();
+                curblock = blocks.top();
+                curblock->append(loop.cast<ASTNode>());
+                break;
+            }
+            // 3.11+ already closed the loop at its back-edge; this opcode is only the terminator
+            if (mod->verCompare(3, 11) >= 0)
+                break;
+            if (opcode == Pyc::END_ASYNC_FOR) {
+                fprintf(stderr, "Unsupported opcode: %s (%d), emitting placeholder\n",
+                        Pyc::OpcodeName(opcode), opcode);
+                cleanBuild = false;
+                curblock->append(new ASTUnsupported(std::string("# unsupported opcode ") +
+                                 Pyc::OpcodeName(opcode)));
+            }
             break;
         case Pyc::POP_ITER:
         case Pyc::INSTRUMENTED_POP_ITER_A:
@@ -7652,6 +7850,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             {
                 if (skipNextPopTop) {
                     skipNextPopTop = false;
+                    break;
+                }
+                // 3.11+ await/yield-from leaves the expression for POP_TOP. Older versions already emit it.
+                if (mod->verCompare(3, 11) >= 0 && !stack.empty() && stack.top() != nullptr
+                        && stack.top().type() == ASTNode::NODE_AWAITABLE) {
+                    PycRef<ASTNode> awaited = stack.top();
+                    stack.pop();
+                    curblock->append(awaited);
                     break;
                 }
                 if (suppressNextPopTop) {
@@ -8369,7 +8575,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 PycRef<ASTNode> value = stack.top();
                 stack.pop();
                 PycRef<ASTNode> dest = new ASTName(code->getLocal(operand >> 4));
-                if (curblock->blktype() == ASTBlock::BLK_FOR
+                if ((curblock->blktype() == ASTBlock::BLK_FOR
+                            || (mod->verCompare(3, 11) >= 0
+                                && curblock->blktype() == ASTBlock::BLK_ASYNCFOR))
                         && !curblock->inited()) {
                     curblock.cast<ASTIterBlock>()->setIndex(dest);
                 } else if (curblock->blktype() == ASTBlock::BLK_WITH
@@ -8508,7 +8716,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     if (handleExceptBinding(curblock, value, name))
                         break;
 
-                    if (curblock->blktype() == ASTBlock::BLK_FOR
+                    if ((curblock->blktype() == ASTBlock::BLK_FOR
+                                || (mod->verCompare(3, 11) >= 0
+                                    && curblock->blktype() == ASTBlock::BLK_ASYNCFOR))
                             && !curblock->inited()) {
                         curblock.cast<ASTIterBlock>()->setIndex(name);
                     } else if (!stack.empty()
@@ -9073,6 +9283,82 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             }
             break;
         case Pyc::EXTENDED_ARG_A:
+            break;
+        case Pyc::SEND_A:
+            {
+                // await / yield from: the forward target is where the result is used; the yield loop is not source
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
+                }
+                stack.pop();
+                if (mod->verCompare(3, 15) >= 0 && !stack.empty() && stack.top() == nullptr)
+                    stack.pop();
+                int target = ast_relative_jump_target(mod, opcode, operand, pos, false);
+                while (pos < target && !source.atEof()) {
+                    curpos = pos;
+                    bc_next(source, mod, opcode, operand, pos);
+                }
+                if (mod->verCompare(3, 12) >= 0 && code->code() != nullptr) {
+                    int op = 0, arg = 0, next = 0;
+                    if (ast_read_wordcode_instr(code->code(), mod, pos, op, arg, next)
+                            && (op == Pyc::END_SEND || op == Pyc::INSTRUMENTED_END_SEND_A)) {
+                        curpos = pos;
+                        bc_next(source, mod, opcode, operand, pos);
+                    }
+                }
+            }
+            break;
+        case Pyc::END_SEND:
+        case Pyc::INSTRUMENTED_END_SEND_A:
+            // Consumed with SEND when it is the result edge. A lone one keeps the awaited value.
+            break;
+        case Pyc::CLEANUP_THROW:
+            {
+                // Exception edge of SEND: CLEANUP_THROW; jump back to END_SEND; StopIteration wrapper
+                int op = 0, arg = 0, next = 0;
+                if (code->code() != nullptr
+                        && ast_read_wordcode_instr(code->code(), mod, pos, op, arg, next)
+                        && (op == Pyc::JUMP_BACKWARD_A || op == Pyc::JUMP_BACKWARD_NO_INTERRUPT_A
+                            || op == Pyc::INSTRUMENTED_JUMP_BACKWARD_A)) {
+                    curpos = pos;
+                    bc_next(source, mod, opcode, operand, pos);
+                    if (ast_read_wordcode_instr(code->code(), mod, pos, op, arg, next)
+                            && op == Pyc::CALL_INTRINSIC_1_A) {
+                        curpos = pos;
+                        bc_next(source, mod, opcode, operand, pos);
+                        if (ast_read_wordcode_instr(code->code(), mod, pos, op, arg, next)
+                                && (op == Pyc::RERAISE || op == Pyc::RERAISE_A)) {
+                            curpos = pos;
+                            bc_next(source, mod, opcode, operand, pos);
+                        }
+                    }
+                }
+            }
+            break;
+        case Pyc::ASYNC_GEN_WRAP:
+            break;
+        case Pyc::BEFORE_ASYNC_WITH:
+            if (mod->verCompare(3, 11) < 0) {
+                fprintf(stderr, "Unsupported opcode: %s (%d), emitting placeholder\n",
+                        Pyc::OpcodeName(opcode), opcode);
+                cleanBuild = false;
+                curblock->append(new ASTUnsupported(std::string("# unsupported opcode ") +
+                                 Pyc::OpcodeName(opcode)));
+                break;
+            }
+            {
+                auto it = withBodyEndByBefore.find(curpos);
+                if (it != withBodyEndByBefore.end()) {
+                    PycRef<ASTBlock> withblock = new ASTWithBlock(it->second);
+                    blocks.push(withblock);
+                    curblock = blocks.top();
+                } else {
+                    fprintf(stderr, "Warning: async with in %s could not be reconstructed (offset %d)\n",
+                            code->name() != nullptr ? code->name()->value() : "<unknown>", curpos);
+                    cleanBuild = false;
+                }
+            }
             break;
         default:
             {
@@ -9647,7 +9933,7 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             }
 
             for (const auto& gen : comp->generators()) {
-                pyc_output << " for ";
+                pyc_output << (gen->blktype() == ASTBlock::BLK_ASYNCFOR ? " async for " : " for ");
                 print_src(gen->index(), mod, pyc_output);
                 pyc_output << " in ";
                 print_src(gen->iter(), mod, pyc_output);
@@ -9843,6 +10129,17 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
                 }
             }
         }
+        break;
+    case ASTNode::NODE_AWAITABLE:
+        // 3.8-3.10 still report node 28 until the await-printing stage; 3.11+ prints the expression
+        if (mod->verCompare(3, 11) >= 0) {
+            pyc_output << (node.cast<ASTAwaitable>()->yieldFrom() ? "yield from " : "await ");
+            print_src(node.cast<ASTAwaitable>()->expression(), mod, pyc_output);
+            break;
+        }
+        fprintf(stderr, "Unsupported Node type: %d\n", node.type());
+        cleanBuild = false;
+        pyc_output << "<NODE:" << node.type() << ">";
         break;
     case ASTNode::NODE_RETURN:
         {
