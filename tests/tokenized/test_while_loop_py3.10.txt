@@ -275,3 +275,46 @@ while a and [ 1 , * xs ] : <EOL>
 xs = g ( xs ) <EOL>
 <OUTDENT>
 return xs <EOL>
+<OUTDENT>
+def f_for ( xs , p ) : <EOL>
+<INDENT>
+for x in xs : <EOL>
+<INDENT>
+while p : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( p ) <EOL>
+break <EOL>
+<OUTDENT>
+except E : <EOL>
+<INDENT>
+p . pop ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+h ( x ) <EOL>
+<OUTDENT>
+return p <EOL>
+<OUTDENT>
+def f_exc ( p ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+k ( ) <EOL>
+<OUTDENT>
+except E : <EOL>
+<INDENT>
+while p : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( p ) <EOL>
+break <EOL>
+<OUTDENT>
+except F : <EOL>
+<INDENT>
+p . pop ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+<OUTDENT>
+return p <EOL>
