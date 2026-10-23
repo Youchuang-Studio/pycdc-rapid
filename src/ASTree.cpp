@@ -6549,7 +6549,28 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                                 implicitBack = !hasEnclosingLoop;
                             }
                         }
-                        if ((mod->verCompare(3, 11) < 0 || hasEnclosingLoop) && !implicitBack)
+                        // Jump straight into the handler is the inlined finally's loop back-edge, not continue
+                        bool implicitTail = false;
+                        if (mod->verCompare(3, 11) < 0 && curblock->blktype() == ASTBlock::BLK_TRY
+                                && blocks.size() > 1) {
+                            std::stack<PycRef<ASTBlock> > pending = blocks;
+                            pending.pop();
+                            if (pending.top()->blktype() == ASTBlock::BLK_CONTAINER) {
+                                PycRef<ASTContainerBlock> cont = pending.top().cast<ASTContainerBlock>();
+                                int handler = cont->hasExcept() ? cont->except() : cont->finally();
+                                int loopStart = 0;
+                                std::stack<PycRef<ASTBlock> > loops = blocks;
+                                while (!loops.empty() && !loopStart) {
+                                    int bt = loops.top()->blktype();
+                                    if (bt == ASTBlock::BLK_FOR || bt == ASTBlock::BLK_ASYNCFOR)
+                                        loopStart = loops.top().cast<ASTIterBlock>()->start();
+                                    loops.pop();
+                                }
+                                implicitTail = handler > 0 && pos == handler
+                                        && loopStart != 0 && offs == loopStart;
+                            }
+                        }
+                        if ((mod->verCompare(3, 11) < 0 || hasEnclosingLoop) && !implicitBack && !implicitTail)
                             curblock->append(new ASTKeyword(ASTKeyword::KW_CONTINUE));
                         else if (implicitBack && curblock->nodes().empty())
                             curblock->append(new ASTKeyword(ASTKeyword::KW_PASS));
@@ -7506,8 +7527,28 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         int codeLen = code->code()->length();
                         int firstOp = 0, firstArg = 0, firstNext = 0;
                         bool firstRead = ast_read_wordcode_instr(code->code(), mod, pos, firstOp, firstArg, firstNext);
-                        // LOAD_CONST; RETURN is the implicit None/True pasted on a fall-through, not `else:`
-                        if (firstRead && firstOp != Pyc::LOAD_CONST_A
+                        // None is the implicit fall-through return. Another const belongs inside the try
+                        // when its index was interned before the handler's return const.
+                        bool constInsideTry = false;
+                        if (firstRead && firstOp == Pyc::LOAD_CONST_A) {
+                            PycRef<PycObject> folded = code->getConst(firstArg);
+                            constInsideTry = folded != nullptr && folded->type() == PycObject::TYPE_NONE;
+                            if (!constInsideTry) {
+                                int handlerConst = -1;
+                                int hop = 0, harg = 0, hnext = 0, hat = ownerTry->end(), steps = 0;
+                                while (steps < 16 && hat < codeLen
+                                        && ast_read_wordcode_instr(code->code(), mod, hat, hop, harg, hnext)) {
+                                    if (hop == Pyc::LOAD_CONST_A)
+                                        handlerConst = harg;
+                                    hat = hnext;
+                                    steps++;
+                                    if (hop == Pyc::RETURN_VALUE || hop == Pyc::RETURN_CONST_A)
+                                        break;
+                                }
+                                constInsideTry = !(handlerConst >= 0 && firstArg > handlerConst);
+                            }
+                        }
+                        if (firstRead && !constInsideTry
                                 && tail >= 4 && pos + tail == ownerTry->end() && pos + tail < codeLen) {
                             int lastOp = 0, lastArg = 0, lastNext = 0, scan = pos;
                             while (scan < pos + tail
@@ -7852,8 +7893,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     skipNextPopTop = false;
                     break;
                 }
-                // 3.11+ await/yield-from leaves the expression for POP_TOP. Older versions already emit it.
-                if (mod->verCompare(3, 11) >= 0 && !stack.empty() && stack.top() != nullptr
+                // await / yield from is a statement only when its result is discarded
+                if (!stack.empty() && stack.top() != nullptr
                         && stack.top().type() == ASTNode::NODE_AWAITABLE) {
                     PycRef<ASTNode> awaited = stack.top();
                     stack.pop();
@@ -9077,14 +9118,22 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             break;
         case Pyc::YIELD_FROM:
             {
-                PycRef<ASTNode> dest = stack.top();
-                stack.pop();
-                // TODO: Support yielding into a non-null destination
-                PycRef<ASTNode> value = stack.top();
-                if (value) {
-                    value->setProcessed();
-                    curblock->append(new ASTReturn(value, ASTReturn::YIELD_FROM));
+                // 3.5-3.10 await and yield from: pop the sent None and keep the result for POP_TOP or a store
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
                 }
+                stack.pop();
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
+                }
+                // A null placeholder (3.7 async-for) stays put. An awaitable is already the result.
+                PycRef<ASTNode> value = stack.top();
+                if (value == nullptr || value.type() == ASTNode::NODE_AWAITABLE)
+                    break;
+                stack.pop();
+                stack.push(new ASTAwaitable(value, true));
             }
             break;
         case Pyc::YIELD_VALUE:
@@ -10131,15 +10180,8 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
         }
         break;
     case ASTNode::NODE_AWAITABLE:
-        // 3.8-3.10 still report node 28 until the await-printing stage; 3.11+ prints the expression
-        if (mod->verCompare(3, 11) >= 0) {
-            pyc_output << (node.cast<ASTAwaitable>()->yieldFrom() ? "yield from " : "await ");
-            print_src(node.cast<ASTAwaitable>()->expression(), mod, pyc_output);
-            break;
-        }
-        fprintf(stderr, "Unsupported Node type: %d\n", node.type());
-        cleanBuild = false;
-        pyc_output << "<NODE:" << node.type() << ">";
+        pyc_output << (node.cast<ASTAwaitable>()->yieldFrom() ? "yield from " : "await ");
+        print_src(node.cast<ASTAwaitable>()->expression(), mod, pyc_output);
         break;
     case ASTNode::NODE_RETURN:
         {
