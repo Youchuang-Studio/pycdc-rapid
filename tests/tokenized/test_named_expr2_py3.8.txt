@@ -1,0 +1,34 @@
+def f_call ( q ) : <EOL>
+<INDENT>
+g ( ( x := q . get ( ) ) , x ) <EOL>
+<OUTDENT>
+def f_attr ( o ) : <EOL>
+<INDENT>
+o . x = b = g ( ) <EOL>
+return b <EOL>
+<OUTDENT>
+def f_sub ( o ) : <EOL>
+<INDENT>
+o [ 0 ] = b = g ( ) <EOL>
+return b <EOL>
+<OUTDENT>
+def f_sub_rev ( o ) : <EOL>
+<INDENT>
+b = o [ 0 ] = g ( ) <EOL>
+return b <EOL>
+<OUTDENT>
+def f_none ( ) : <EOL>
+<INDENT>
+a = b = None <EOL>
+return ( a , b ) <EOL>
+<OUTDENT>
+def f_nonlocal ( ) : <EOL>
+<INDENT>
+x = 0 <EOL>
+def h ( ) : <EOL>
+<INDENT>
+nonlocal x <EOL>
+x = y = g ( ) <EOL>
+return y <EOL>
+<OUTDENT>
+return h <EOL>

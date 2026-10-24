@@ -21,8 +21,12 @@
 static void append_to_chain_store(const PycRef<ASTNode>& chainStore,
         PycRef<ASTNode> item, FastStack& stack, const PycRef<ASTBlock>& curblock);
 static bool ast_store_named_expr(PycRef<ASTNode> value, PycRef<ASTNode> name,
-                                 FastStack& stack, PycModule* mod);
+                                 FastStack& stack, PycModule* mod, bool wasDup,
+                                 PycRef<PycCode> code, int pos);
+static bool ast_keep_chain_target(PycRef<ASTNode> value, PycRef<ASTNode> target,
+                                  FastStack& stack, PycModule* mod, bool wasDup);
 static void ast_drop_named_dup(FastStack& stack, PycRef<PycCode> code, PycModule* mod, int pos);
+static bool ast_is_yield_expr(PycRef<ASTNode> node);
 
 /* Use this to determine if an error occurred (and therefore, if we should
  * avoid cleaning the output tree) */
@@ -1279,7 +1283,15 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
         }
         return p;
     };
-    auto hasNormalCleanupAfter = [&opcodeAt, &nextRealInstruction](int bodyEnd) {
+    auto isCleanupNone = [&opcodeAt, &operandAt](int p) {
+        if (p < 0)
+            return false;
+        if (opcodeAt[p] == Pyc::LOAD_CONST_A)
+            return true;
+        // 3.15 loads the three None arguments of the implicit __exit__ from the common-constant pool
+        return opcodeAt[p] == Pyc::LOAD_COMMON_CONSTANT_A && operandAt[p] == 7;
+    };
+    auto hasNormalCleanupAfter = [&opcodeAt, &nextRealInstruction, &isCleanupNone](int bodyEnd) {
         int p = bodyEnd;
         while (p >= 0 && opcodeAt[p] == Pyc::CACHE)
             p = nextRealInstruction(p);
@@ -1288,7 +1300,7 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
                 || opcodeAt[p] == Pyc::POP_TOP))
             p = nextRealInstruction(p);
         for (int i = 0; i < 3; i++) {
-            if (p < 0 || opcodeAt[p] != Pyc::LOAD_CONST_A)
+            if (!isCleanupNone(p))
                 return false;
             p = nextRealInstruction(p);
         }
@@ -1358,8 +1370,7 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
         int cleanupStart = bodyEnd;
         while (cleanupStart >= 0 && opcodeAt[cleanupStart] == Pyc::CACHE)
             cleanupStart = nextRealInstruction(cleanupStart);
-        if (resume < 0 && cleanupStart >= 0
-                && opcodeAt[cleanupStart] == Pyc::LOAD_CONST_A) {
+        if (resume < 0 && cleanupStart >= 0 && isCleanupNone(cleanupStart)) {
             /* A terminal 3.13 with body has no jump over the handler: the
                implicit __exit__(None, None, None) call is followed directly
                by return/control-flow outside the with statement. */
@@ -1414,7 +1425,7 @@ static void ScanWithBlocks(PycRef<PycCode> code, PycModule* mod,
             p = nextRealInstruction(p);
             bool noneArgs = true;
             for (int i = 0; i < 3; i++) {
-                if (p < 0 || opcodeAt[p] != Pyc::LOAD_CONST_A) {
+                if (!isCleanupNone(p)) {
                     noneArgs = false;
                     break;
                 }
@@ -1479,9 +1490,16 @@ static bool ast_scan_finally_handler(PycRef<PycCode> code, PycModule* mod,
     if (r >= (int)op.size() || r == h || (op[r] != Pyc::RERAISE_A && op[r] != Pyc::RERAISE)
             || op[h] == Pyc::POP_TOP)
         return false;
+    // A non-lasti entry inside the handler is a nested try, unless it is only the await SEND edge
     for (const auto& e : entries) {
-        if (!e.push_lasti && e.start_offset > T && e.start_offset < at[r])
-            return false;
+        if (e.push_lasti || e.start_offset <= T || e.start_offset >= at[r])
+            continue;
+        auto tgt = indexAt.find(e.target);
+        if (tgt != indexAt.end() && (op[tgt->second] == Pyc::CLEANUP_THROW
+                || op[tgt->second] == Pyc::END_ASYNC_FOR || op[tgt->second] == Pyc::END_ASYNC_FOR_A
+                || op[tgt->second] == Pyc::INSTRUMENTED_END_ASYNC_FOR_A))
+            continue;
+        return false;
     }
     // Cleanup handler of the finally handler: COPY 3; POP_EXCEPT; RERAISE 1
     int cleanupEnd = -1;
@@ -1527,30 +1545,58 @@ static bool ast_scan_finally_handler(PycRef<PycCode> code, PycModule* mod,
             || o == Pyc::POP_JUMP_IF_FALSE_A || o == Pyc::POP_JUMP_IF_TRUE_A
             || o == Pyc::POP_JUMP_IF_NONE_A || o == Pyc::POP_JUMP_IF_NOT_NONE_A
             || o == Pyc::POP_JUMP_FORWARD_IF_FALSE_A || o == Pyc::POP_JUMP_FORWARD_IF_TRUE_A
-            || o == Pyc::POP_JUMP_FORWARD_IF_NONE_A || o == Pyc::POP_JUMP_FORWARD_IF_NOT_NONE_A;
+            || o == Pyc::POP_JUMP_FORWARD_IF_NONE_A || o == Pyc::POP_JUMP_FORWARD_IF_NOT_NONE_A
+            || o == Pyc::SEND_A || o == Pyc::YIELD_VALUE || o == Pyc::YIELD_VALUE_A
+            || o == Pyc::RESUME_A || o == Pyc::INSTRUMENTED_RESUME_A;
     };
-    const int len = r - h;
-    auto sameAsFinally = [&](int k) {
-        for (int j = 0; j < len; j++) {
-            if (norm(op[k + j]) != norm(op[h + j]) || (!isJump(op[k + j]) && arg[k + j] != arg[h + j]))
-                return false;
+    // SEND's exception edge sits inside the handler copy but after the inline copy
+    auto skipNoise = [&](int& i, int limit) {
+        while (i < limit && (op[i] == Pyc::CACHE || op[i] == Pyc::CLEANUP_THROW)) {
+            if (op[i] == Pyc::CLEANUP_THROW) {
+                i++;
+                if (i < limit && (op[i] == Pyc::JUMP_BACKWARD_A || op[i] == Pyc::JUMP_BACKWARD_NO_INTERRUPT_A
+                        || op[i] == Pyc::JUMP_FORWARD_A))
+                    i++;
+            } else {
+                i++;
+            }
         }
-        return true;
+    };
+    auto sameBody = [&](int k, int& endOut) {
+        int a = k, b = h;
+        while (true) {
+            skipNoise(a, ti->second);
+            skipNoise(b, r);
+            if (b >= r) {
+                endOut = a;
+                return a > k;
+            }
+            if (a >= ti->second || norm(op[a]) != norm(op[b]))
+                return false;
+            if (!isJump(op[a]) && arg[a] != arg[b])
+                return false;
+            a++;
+            b++;
+        }
     };
     std::vector<int> copies;
-    for (int k = si->second; k + len <= ti->second; k++) {
-        if (sameAsFinally(k)) {
+    std::vector<int> copyEnds;
+    for (int k = si->second; k < ti->second; k++) {
+        int endK = k;
+        if (sameBody(k, endK)) {
             copies.push_back(k);
-            k += len - 1;
+            copyEnds.push_back(endK);
+            k = endK - 1;
         }
     }
     if (copies.empty())
         return false;
-    for (int k : copies) {
-        for (int j = 0; j < len; j++)
-            skip.insert(at[k + j]);
+    for (size_t ci = 0; ci < copies.size(); ci++) {
+        int k = copies[ci];
+        for (int j = k; j < copyEnds[ci]; j++)
+            skip.insert(at[j]);
         // A jump that only resumes after the try statement belongs to the skipped copy
-        int after = k + len;
+        int after = copyEnds[ci];
         while (after < (int)op.size() && op[after] == Pyc::CACHE)
             after++;
         if (after < (int)op.size() && (op[after] == Pyc::JUMP_FORWARD_A || op[after] == Pyc::JUMP_BACKWARD_A)
@@ -2155,7 +2201,41 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                 if (cond && leaves)
                     exits++;
             }
-            if (guard >= 0 && exits == 1) {
+            // Every leaving jump shares the back-edge fallthrough: while A and B, not a bare if
+            bool pureAnd = exits >= 1;
+            if (exits > 1) {
+                for (int g : order) {
+                    if (g < loop_start || g >= b)
+                        continue;
+                    bool cond = isFwdGuard(opAt[g]) || opAt[g] == Pyc::JUMP_IF_FALSE_OR_POP_A
+                            || opAt[g] == Pyc::JUMP_IF_TRUE_OR_POP_A;
+                    if (cond && (operAt[g] == end || operAt[g] == threaded) && operAt[g] != end)
+                        pureAnd = false;
+                }
+            }
+            // Compound `and` is a while only when the header stores a walrus; a plain if must stay an if
+            bool headerWalrus = false;
+            if (exits > 1 && guard > loop_start) {
+                for (int g : order) {
+                    if (g <= loop_start || g >= guard)
+                        continue;
+                    bool store = opAt[g] == Pyc::STORE_FAST_A || opAt[g] == Pyc::STORE_NAME_A
+                            || opAt[g] == Pyc::STORE_GLOBAL_A || opAt[g] == Pyc::STORE_DEREF_A
+                            || opAt[g] == Pyc::STORE_ATTR_A || opAt[g] == Pyc::STORE_SUBSCR;
+                    if (!store)
+                        continue;
+                    int prev = -1;
+                    for (int p : order) {
+                        if (p >= g)
+                            break;
+                        if (p >= loop_start)
+                            prev = p;
+                    }
+                    if (prev >= 0 && opAt[prev] == Pyc::DUP_TOP)
+                        headerWalrus = true;
+                }
+            }
+            if (guard >= 0 && (exits == 1 || (pureAnd && headerWalrus))) {
                 whileGuardEnd[guard] = end;
                 whileBackedges.insert(b);
             }
@@ -2222,6 +2302,52 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
             }
             return false;
         };
+        // Two jumps may land on different copies of the same return; that is still one exit
+        auto returnSpan = [&](int at) -> int {
+            for (int p : order) {
+                if (p < at)
+                    continue;
+                if (p > at + 12)
+                    return 0;
+                int op = opAt[p];
+                if (op == Pyc::CACHE)
+                    continue;
+                if (op == Pyc::LOAD_CONST_A)
+                    continue;
+                if (op == Pyc::RETURN_VALUE)
+                    return nextAt[p] > at ? nextAt[p] - at : 0;
+                return 0;
+            }
+            return 0;
+        };
+        // Copies of one return need not leave another full copy after the last one
+        auto sameExitBlock = [&](int target, int exit) {
+            if (target == exit)
+                return true;
+            int span = returnSpan(target);
+            if (span < 2 || span != returnSpan(exit) || bytes == nullptr)
+                return false;
+            if (target < 0 || exit < 0 || target + span > codeLen || exit + span > codeLen)
+                return false;
+            return memcmp(bytes + target, bytes + exit, span) == 0;
+        };
+        // DUP_TOP; STORE a few instructions before the jump is a walrus in this test
+        auto nearWalrus = [&](int at) {
+            int prev = prevOf(at);
+            for (int steps = 0; prev >= 0 && steps < 8; steps++) {
+                int op = opAt[prev];
+                bool store = op == Pyc::STORE_FAST_A || op == Pyc::STORE_NAME_A
+                        || op == Pyc::STORE_GLOBAL_A || op == Pyc::STORE_DEREF_A
+                        || op == Pyc::STORE_ATTR_A || op == Pyc::STORE_SUBSCR;
+                int before = prevOf(prev);
+                if (store && before >= 0 && opAt[before] == Pyc::DUP_TOP)
+                    return true;
+                if (isBoundary(op))
+                    return false;
+                prev = prevOf(prev);
+            }
+            return false;
+        };
         std::map<int, int> lastBack;
         for (int b : order) {
             if (!isPopJump(opAt[b]))
@@ -2252,12 +2378,19 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                     if (target < scan)
                         break;
                     bool inCond = target > scan && target < body;
-                    if (target != exit && target != body && !inCond)
+                    // Only a walrus test may treat a copied return as the same exit
+                    bool copiedExit = sameExitBlock(target, exit) && nearWalrus(scan);
+                    if (target != exit && target != body && !inCond && !copiedExit)
                         break;
                     chain.push_back(scan);
                     continue;
                 }
-                if (isBoundary(op))
+                // DUP_TOP; STORE is a walrus inside the condition, not a statement boundary
+                bool walrusStore = (op == Pyc::STORE_FAST_A || op == Pyc::STORE_NAME_A
+                        || op == Pyc::STORE_GLOBAL_A || op == Pyc::STORE_DEREF_A
+                        || op == Pyc::STORE_ATTR_A || op == Pyc::STORE_SUBSCR);
+                int prev = prevOf(scan);
+                if (isBoundary(op) && !(walrusStore && prev >= 0 && opAt[prev] == Pyc::DUP_TOP))
                     break;
             }
             bool pureAnd = true;
@@ -2265,7 +2398,7 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
             for (size_t i = 0; i < chain.size(); i++) {
                 int target = absJump(chain[i]);
                 bool last = i == 0; // chain is stored from the guard backward
-                if (target != exit)
+                if (target != exit && !(sameExitBlock(target, exit) && nearWalrus(chain[i])))
                     pureAnd = false;
                 if (last) {
                     if (target != exit)
@@ -2281,7 +2414,10 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                 continue;
             }
             int first = chain.back();
-            whileGuardEnd[first] = absJump(first);
+            int firstTarget = absJump(first);
+            // A walrus `and` may jump at a nearer copy of the far return
+            whileGuardEnd[first] = (sameExitBlock(firstTarget, exit) && nearWalrus(first))
+                    ? exit : firstTarget;
             for (size_t i = 0; i + 1 < chain.size(); i++)
                 whileCondJumps.insert(chain[i]);
             whileBackedges.insert(b);
@@ -2295,7 +2431,12 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
                         break;
                     continue;
                 }
-                if (isBoundary(op))
+                // DUP_TOP; STORE is a walrus inside the condition, not a statement boundary
+                bool walrusStore = (op == Pyc::STORE_FAST_A || op == Pyc::STORE_NAME_A
+                        || op == Pyc::STORE_GLOBAL_A || op == Pyc::STORE_DEREF_A
+                        || op == Pyc::STORE_ATTR_A || op == Pyc::STORE_SUBSCR);
+                int prev = prevOf(scan);
+                if (isBoundary(op) && !(walrusStore && prev >= 0 && opAt[prev] == Pyc::DUP_TOP))
                     break;
             }
             if (exit > fall && duplicateExit(fall, exit))
@@ -2337,6 +2478,37 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
         }
         return last >= 0 && (opAt[last] == Pyc::RETURN_VALUE || opAt[last] == Pyc::RETURN_CONST_A);
     };
+    auto returnSpan = [&](int at) -> int {
+        for (int p : order) {
+            if (p < at)
+                continue;
+            if (p > at + 12)
+                return 0;
+            int op = opAt[p];
+            if (op == Pyc::CACHE || op == Pyc::NOT_TAKEN || op == Pyc::INSTRUMENTED_NOT_TAKEN_A)
+                continue;
+            if (op == Pyc::LOAD_CONST_A)
+                continue;
+            if (op == Pyc::RETURN_VALUE || op == Pyc::RETURN_CONST_A
+                    || op == Pyc::INSTRUMENTED_RETURN_VALUE_A
+                    || op == Pyc::INSTRUMENTED_RETURN_CONST_A)
+                return nextAt[p] > at ? nextAt[p] - at : 0;
+            return 0;
+        }
+        return 0;
+    };
+    auto sameReturn = [&](int a, int b) {
+        if (a == b)
+            return true;
+        int span = returnSpan(a);
+        if (span < 2 || span != returnSpan(b) || code->code() == nullptr)
+            return false;
+        const char* bytes = code->code()->value();
+        int len = code->code()->length();
+        if (bytes == nullptr || a < 0 || b < 0 || a + span > len || b + span > len)
+            return false;
+        return memcmp(bytes + a, bytes + b, span) == 0;
+    };
 
     for (int b : order) {
         if (!isCondBack(opAt[b]))
@@ -2353,10 +2525,63 @@ static void ScanWhileLoops(PycRef<PycCode> code, PycModule* mod,
             continue;
         int guard_target = ast_next_instr_offset_after_caches(
                 mod, opAt[guard], nextAt[guard]) + operAt[guard] * 2;
-        bool dup = guard_target != end && dupExit(end, guard_target);
+        bool copiedReturn = guard_target != end && !dupExit(end, guard_target)
+                && sameReturn(end, guard_target);
+        bool dup = guard_target != end && (dupExit(end, guard_target) || copiedReturn);
         if (guard_target != end && !dup)            /* guard must skip to loop end */
             continue;
-        whileGuardEnd[guard] = guard_target;
+        int useGuard = guard;
+        // Earlier jumps to copies of this return are the rest of `while A and B`
+        if (copiedReturn) {
+            int scan = guard;
+            while (guard - scan < 80) {
+                int prev = -1;
+                for (int p : order) {
+                    if (p >= scan)
+                        break;
+                    if (opAt[p] == Pyc::CACHE || opAt[p] == Pyc::NOT_TAKEN
+                            || opAt[p] == Pyc::INSTRUMENTED_NOT_TAKEN_A)
+                        continue;
+                    prev = p;
+                }
+                if (prev < 0)
+                    break;
+                int op = opAt[prev];
+                bool store = op == Pyc::STORE_FAST_A || op == Pyc::STORE_NAME_A
+                        || op == Pyc::STORE_GLOBAL_A || op == Pyc::STORE_DEREF_A
+                        || op == Pyc::STORE_ATTR_A || op == Pyc::STORE_SUBSCR;
+                if (store) {
+                    int before = -1;
+                    for (int p : order) {
+                        if (p >= prev)
+                            break;
+                        if (opAt[p] == Pyc::CACHE || opAt[p] == Pyc::NOT_TAKEN)
+                            continue;
+                        before = p;
+                    }
+                    if (before >= 0 && (opAt[before] == Pyc::DUP_TOP || opAt[before] == Pyc::COPY_A)) {
+                        scan = prev;
+                        continue;
+                    }
+                    break;
+                }
+                if (isFwdGuard(op)) {
+                    int tgt = ast_next_instr_offset_after_caches(mod, op, nextAt[prev]) + operAt[prev] * 2;
+                    if (tgt == guard_target || sameReturn(tgt, guard_target)) {
+                        whileCondJumps.insert(useGuard);
+                        useGuard = prev;
+                        scan = prev;
+                        continue;
+                    }
+                    break;
+                }
+                if (op == Pyc::POP_TOP || op == Pyc::RETURN_VALUE || op == Pyc::RETURN_CONST_A
+                        || op == Pyc::JUMP_FORWARD_A || op == Pyc::JUMP_BACKWARD_A)
+                    break;
+                scan = prev;
+            }
+        }
+        whileGuardEnd[useGuard] = guard_target;
         whileBackedges.insert(b);
         if (dup)
             whileDupSkip[b] = guard_target;
@@ -4919,6 +5144,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 stack.pop();
                 PycRef<ASTNode> left = stack.top();
                 stack.pop();
+                // `(name := value) in seq` is one chain kept as a value, not an assignment
+                if (left != nullptr && left.type() == ASTNode::NODE_CHAINSTORE
+                        && left.cast<ASTChainStore>()->nodes().size() == 1)
+                    left.cast<ASTChainStore>()->setExpression(true);
                 // The operand will be 0 for 'in' and 1 for 'not in'.
                 stack.push(ast_chain_compare(chainLeft, chainMiddle, left, right,
                         operand ? ASTCompare::CMP_NOT_IN : ASTCompare::CMP_IN));
@@ -5024,19 +5253,21 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::DUP_TOP:
             {
                 if (stack.top().type() == PycObject::TYPE_NULL) {
-                    stack.push(stack.top());
+                    // None is a null slot; the mark, not pointer equality, makes the later store a chain
+                    stack.push(stack.top(), curpos);
                 } else if (mod->verCompare(3, 8) >= 0
                         && stack.top().type() == ASTNode::NODE_CHAINSTORE
                         && stack.top().cast<ASTChainStore>()->expression()) {
                     // Nested (y := (x := ...)) copies the inner named expression
-                    stack.push(stack.top());
+                    stack.push(stack.top(), curpos);
                 } else if (stack.top().type() == ASTNode::NODE_CHAINSTORE) {
+                    int chainAt = stack.top_dup_at();
                     auto chainstore = stack.top();
                     stack.pop();
-                    stack.push(stack.top());
-                    stack.push(chainstore);
+                    stack.push(stack.top(), curpos);
+                    stack.push(chainstore, chainAt);
                 } else {
-                    stack.push(stack.top());
+                    stack.push(stack.top(), curpos);
                     ASTNodeList::list_t targets;
                     stack.push(new ASTChainStore(targets, stack.top()));
                 }
@@ -5587,6 +5818,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 } else if (operand == 3) {
                     /* INTRINSIC_STOPITERATION_ERROR wraps a generator's return
                        path at runtime; it has no source-level representation. */
+                } else if (operand == 4) {
+                    // INTRINSIC_ASYNC_GEN_WRAP marks an async generator; no source form
                 } else if (operand == 6) {
                     // INTRINSIC_LIST_TO_TUPLE (3.12+): *args list becomes a tuple
                     PycRef<ASTNode> list = stack.top();
@@ -5730,6 +5963,8 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 if (mod->verCompare(3, 8) >= 0 && cond != nullptr && opcode != Pyc::JUMP_IF_FALSE_OR_POP_A
                         && opcode != Pyc::JUMP_IF_TRUE_OR_POP_A && opcode != Pyc::JUMP_IF_NOT_EXC_MATCH_A
                         && !whileCondJumps.count(curpos)
+                        && !(curblock->blktype() == ASTBlock::BLK_WHILE && curblock->size() == 0
+                                && curblock.cast<ASTCondBlock>()->cond() != nullptr)
                         && !(stack.size() >= 2 && stack.top(2) == cond)) {
                     bool relative = mod->verCompare(3, 12) >= 0 || opcode == Pyc::POP_JUMP_FORWARD_IF_FALSE_A
                             || opcode == Pyc::POP_JUMP_FORWARD_IF_TRUE_A || opcode == Pyc::POP_JUMP_FORWARD_IF_NONE_A
@@ -5947,6 +6182,20 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     auto tit = trampolineExit.find(offs);
                     if (tit != trampolineExit.end())
                         offs = tit->second;
+                }
+
+                // A walrus while whose second test returns through a copy of the same exit is still `and`
+                PycRef<ASTChainStore> walrusCond = curblock->blktype() == ASTBlock::BLK_WHILE
+                        ? curblock.cast<ASTCondBlock>()->cond().try_cast<ASTChainStore>() : nullptr;
+                if (walrusCond != nullptr && walrusCond->expression() && curblock->size() == 0
+                        && offs > curpos && offs < curblock->end() && code->code() != nullptr) {
+                    int span = curblock->end() - offs;
+                    const char* retBytes = code->code()->value();
+                    int retLen = code->code()->length();
+                    if (span >= 4 && span <= 16 && (span % 2) == 0
+                            && curblock->end() + span <= retLen
+                            && memcmp(retBytes + offs, retBytes + curblock->end(), span) == 0)
+                        offs = curblock->end();
                 }
 
                 if (cond.type() == ASTNode::NODE_COMPARE
@@ -7537,6 +7786,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         bool firstRead = ast_read_wordcode_instr(code->code(), mod, pos, firstOp, firstArg, firstNext);
                         // None is the implicit fall-through return. Another const belongs inside the try
                         // when its index was interned before the handler's return const.
+                        // Basis: CPython appends a new co_const when it is first emitted, and the
+                        // handler return is emitted before `else: return <new>`. A greater index is
+                        // that else. A const already used earlier keeps a smaller index. An equal
+                        // index is the same object as the handler return, so it is not else.
                         bool constInsideTry = false;
                         if (firstRead && firstOp == Pyc::LOAD_CONST_A) {
                             PycRef<PycObject> folded = code->getConst(firstArg);
@@ -7813,7 +8066,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             break;
         case Pyc::END_FOR:
             {
-                if (inlineCompActive && inlineCompCleanupOps > 0) {
+                // Cleanup left by an inlined comp must not eat the END_FOR of a real for still open here
+                if (inlineCompActive && inlineCompCleanupOps > 0
+                        && !(curblock->blktype() == ASTBlock::BLK_FOR
+                             && curblock->end() != 0 && curblock->end() <= pos)) {
                     inlineCompCleanupOps--;
                     break;
                 }
@@ -7901,9 +8157,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     skipNextPopTop = false;
                     break;
                 }
-                // await / yield from is a statement only when its result is discarded
+                // await / yield / yield from is a statement only when its result is discarded
                 if (!stack.empty() && stack.top() != nullptr
-                        && stack.top().type() == ASTNode::NODE_AWAITABLE) {
+                        && (stack.top().type() == ASTNode::NODE_AWAITABLE
+                            || ast_is_yield_expr(stack.top()))) {
                     PycRef<ASTNode> awaited = stack.top();
                     stack.pop();
                     curblock->append(awaited);
@@ -8538,9 +8795,11 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         if (unpackStar >= 0)
                             tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
+                        bool seqDup = stack.top_is_dup();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
-                        if (seq.type() == ASTNode::NODE_CHAINSTORE) {
+                        if (seq != nullptr && ast_keep_chain_target(seq, tup, stack, mod, seqDup)) {
+                        } else if (seq.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(seq, tup, stack, curblock);
                         } else {
                             curblock->append(new ASTStore(seq, tup));
@@ -8549,10 +8808,13 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 } else {
                     PycRef<ASTNode> name = stack.top();
                     stack.pop();
+                    bool valueDup = stack.top_is_dup();
                     PycRef<ASTNode> value = stack.top();
                     stack.pop();
                     PycRef<ASTNode> attr = new ASTBinary(name, new ASTName(code->getName(operand)), ASTBinary::BIN_ATTR);
-                    if (value.type() == ASTNode::NODE_CHAINSTORE) {
+                    if (ast_keep_chain_target(value, attr, stack, mod, valueDup)) {
+                        break;
+                    } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, attr, stack, curblock);
                     } else {
                         curblock->append(new ASTStore(value, attr));
@@ -8578,16 +8840,19 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         if (unpackStar >= 0)
                             tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
+                        bool seqDup = stack.top_is_dup();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
 
-                        if (seq.type() == ASTNode::NODE_CHAINSTORE) {
+                        if (seq != nullptr && ast_keep_chain_target(seq, tup, stack, mod, seqDup)) {
+                        } else if (seq.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(seq, tup, stack, curblock);
                         } else {
                             curblock->append(new ASTStore(seq, tup));
                         }
                     }
                 } else {
+                    bool valueDup = stack.top_is_dup();
                     PycRef<ASTNode> value = stack.top();
                     stack.pop();
                     PycRef<PycString> cellName = code->getCellVar(mod, operand);
@@ -8606,7 +8871,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         }
                     }
 
-                    if (ast_store_named_expr(value, name, stack, mod)) {
+                    if (ast_store_named_expr(value, name, stack, mod, valueDup, code, pos)) {
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
                     } else if (!ast_attach_decorators(curblock, value, name)) {
@@ -8623,6 +8888,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 break;
             }
             {
+                bool valueDup = stack.top_is_dup();
                 PycRef<ASTNode> value = stack.top();
                 stack.pop();
                 PycRef<ASTNode> dest = new ASTName(code->getLocal(operand >> 4));
@@ -8646,6 +8912,18 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     }
                     curblock.cast<ASTWithBlock>()->setExpr(expr);
                     curblock.cast<ASTWithBlock>()->setVar(dest);
+                } else if (mod->verCompare(3, 8) >= 0 && valueDup && value != nullptr
+                        && !stack.empty() && stack.top() == value) {
+                    // COPY; STORE_FAST_LOAD_FAST. Same local reloaded is (x := v); a different local is b = ... = v
+                    stack.pop();
+                    ASTNodeList::list_t targets;
+                    PycRef<ASTChainStore> named = new ASTChainStore(targets, value);
+                    named->append(dest);
+                    if ((operand >> 4) == (operand & 0xF))
+                        named->setExpression(true);
+                    stack.push(named.cast<ASTNode>());
+                    stack.push(new ASTName(code->getLocal(operand & 0xF)));
+                    break;
                 } else {
                     curblock->append(new ASTStore(value, dest));
                 }
@@ -8664,13 +8942,17 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             tuple->setRequireParens(false);
                             stack.pop();
                             PycRef<ASTNode> seq;
+                            bool seqDup = false;
                             if (!stack.empty()) {
+                                seqDup = stack.top_is_dup();
                                 seq = stack.top();
                                 stack.pop();
                             }
                             if (curblock->blktype() == ASTBlock::BLK_FOR
                                     && !curblock->inited()) {
                                 curblock.cast<ASTIterBlock>()->setIndex(tuple.cast<ASTNode>());
+                            } else if (seq != nullptr && ast_keep_chain_target(seq, tuple.cast<ASTNode>(), stack, mod, seqDup)) {
+                                // a, b = c = g(): the copy left under the unpack is the same value
                             } else if (seq != nullptr) {
                                 curblock->append(new ASTStore(seq, tuple.cast<ASTNode>()));
                             }
@@ -8678,13 +8960,24 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         break;
                     }
                 }
+                bool value2Dup = stack.top_is_dup();
                 PycRef<ASTNode> value2 = stack.top();
                 stack.pop();
-                PycRef<ASTNode> value1 = stack.empty() ? nullptr : stack.top();
-                if (!stack.empty())
+                bool hadTwo = !stack.empty();
+                PycRef<ASTNode> value1 = hadTwo ? stack.top() : nullptr;
+                if (hadTwo)
                     stack.pop();
                 // COPY 1; STORE_FAST_STORE_FAST is a = b = value, one evaluation
-                if (value1 != nullptr && value1 == value2 && mod->verCompare(3, 8) >= 0) {
+                // Two nulls are one None only when COPY 1 recorded the top slot
+                if (hadTwo && value2Dup && value1 == value2 && mod->verCompare(3, 8) >= 0) {
+                    if (value2 != nullptr && value2.type() == ASTNode::NODE_CHAINSTORE) {
+                        value2.cast<ASTChainStore>()->append(new ASTName(code->getLocal(operand >> 4)));
+                        value2.cast<ASTChainStore>()->append(new ASTName(code->getLocal(operand & 0xF)));
+                        curblock->append(value2);
+                        break;
+                    }
+                    if (value1 == nullptr)
+                        value1 = new ASTObject(Pyc_None);
                     ASTNodeList::list_t targets;
                     PycRef<ASTChainStore> chain = new ASTChainStore(targets, value1);
                     chain->append(new ASTName(code->getLocal(operand >> 4)));
@@ -8724,6 +9017,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         if (unpackStar >= 0)
                             tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
+                        bool seqDup = stack.top_is_dup();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
 
@@ -8733,6 +9027,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             if (tuple != NULL)
                                 tuple->setRequireParens(false);
                             curblock.cast<ASTIterBlock>()->setIndex(tup);
+                        } else if (seq != nullptr && ast_keep_chain_target(seq, tup, stack, mod, seqDup)) {
                         } else if (seq.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(seq, tup, stack, curblock);
                         } else {
@@ -8740,6 +9035,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         }
                     }
                 } else {
+                    bool valueDup = stack.top_is_dup();
                     PycRef<ASTNode> value = stack.top();
                     stack.pop();
                     PycRef<ASTNode> name;
@@ -8802,7 +9098,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         }
                         curblock.cast<ASTWithBlock>()->setExpr(expr);
                         curblock.cast<ASTWithBlock>()->setVar(name);
-                    } else if (ast_store_named_expr(value, name, stack, mod)) {
+                    } else if (ast_store_named_expr(value, name, stack, mod, valueDup, code, pos)) {
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
                     } else if (!ast_attach_decorators(curblock, value, name)) {
@@ -8831,6 +9127,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         if (unpackStar >= 0)
                             tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
+                        bool seqDup = stack.top_is_dup();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
 
@@ -8840,6 +9137,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             if (tuple != NULL)
                                 tuple->setRequireParens(false);
                             curblock.cast<ASTIterBlock>()->setIndex(tup);
+                        } else if (seq != nullptr && ast_keep_chain_target(seq, tup, stack, mod, seqDup)) {
                         } else if (seq.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(seq, tup, stack, curblock);
                         } else {
@@ -8847,9 +9145,10 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         }
                     }
                 } else {
+                    bool valueDup = stack.top_is_dup();
                     PycRef<ASTNode> value = stack.top();
                     stack.pop();
-                    if (ast_store_named_expr(value, name, stack, mod)) {
+                    if (ast_store_named_expr(value, name, stack, mod, valueDup, code, pos)) {
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
                     } else if (!ast_attach_decorators(curblock, value, name)) {
@@ -8880,6 +9179,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         if (unpackStar >= 0)
                             tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
+                        bool seqDup = stack.top_is_dup();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
 
@@ -8889,6 +9189,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             if (tuple != NULL)
                                 tuple->setRequireParens(false);
                             curblock.cast<ASTIterBlock>()->setIndex(tup);
+                        } else if (seq != nullptr && ast_keep_chain_target(seq, tup, stack, mod, seqDup)) {
                         } else if (seq.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(seq, tup, stack, curblock);
                         } else {
@@ -8896,6 +9197,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         }
                     }
                 } else {
+                    bool valueDup = stack.top_is_dup();
                     PycRef<ASTNode> value = stack.top();
                     stack.pop();
 
@@ -8931,7 +9233,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                                && !curblock->inited()) {
                         curblock.cast<ASTWithBlock>()->setExpr(value);
                         curblock.cast<ASTWithBlock>()->setVar(name);
-                    } else if (ast_store_named_expr(value, name, stack, mod)) {
+                    } else if (ast_store_named_expr(value, name, stack, mod, valueDup, code, pos)) {
                     } else if (value.type() == ASTNode::NODE_CHAINSTORE) {
                         append_to_chain_store(value, name, stack, curblock);
                     } else if (!ast_attach_decorators(curblock, value, name)) {
@@ -9015,9 +9317,11 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                         if (unpackStar >= 0)
                             tup.cast<ASTTuple>()->setRequireParens(false);
                         stack.pop();
+                        bool seqDup = stack.top_is_dup();
                         PycRef<ASTNode> seq = stack.top();
                         stack.pop();
-                        if (seq.type() == ASTNode::NODE_CHAINSTORE) {
+                        if (seq != nullptr && ast_keep_chain_target(seq, tup, stack, mod, seqDup)) {
+                        } else if (seq.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(seq, tup, stack, curblock);
                         } else {
                             curblock->append(new ASTStore(seq, tup));
@@ -9028,6 +9332,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     stack.pop();
                     PycRef<ASTNode> dest = stack.top();
                     stack.pop();
+                    bool srcDup = stack.top_is_dup();
                     PycRef<ASTNode> src = stack.top();
                     stack.pop();
 
@@ -9050,7 +9355,9 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                             curblock->append(new ASTAnnotatedVar(subscr, src));
                         }
                     } else {
-                        if (dest.type() == ASTNode::NODE_MAP) {
+                        if (ast_keep_chain_target(src, new ASTSubscr(dest, subscr), stack, mod, srcDup)) {
+                            break;
+                        } else if (dest.type() == ASTNode::NODE_MAP) {
                             dest.cast<ASTMap>()->add(subscr, src);
                         } else if (src.type() == ASTNode::NODE_CHAINSTORE) {
                             append_to_chain_store(src, new ASTSubscr(dest, subscr), stack, curblock);
@@ -9166,9 +9473,14 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::YIELD_VALUE_A:
         case Pyc::INSTRUMENTED_YIELD_VALUE_A:
             {
+                // The result is None for a bare yield statement, or the sent value when stored
+                if (stack.empty()) {
+                    cleanBuild = false;
+                    break;
+                }
                 PycRef<ASTNode> value = stack.top();
                 stack.pop();
-                curblock->append(new ASTReturn(value, ASTReturn::YIELD));
+                stack.push(new ASTReturn(value, ASTReturn::YIELD));
             }
             break;
         case Pyc::SETUP_ANNOTATIONS:
@@ -9354,7 +9666,11 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::COPY_A:
             {
                 PycRef<ASTNode> value = stack.top(operand);
-                stack.push(value);
+                // Only COPY 1 is an assignment duplicate. COPY 2/3 moves exception state.
+                if (operand == 1)
+                    stack.push(value, curpos);
+                else
+                    stack.push(value);
             }
             break;
         case Pyc::EXTENDED_ARG_A:
@@ -9516,16 +9832,98 @@ static void ast_drop_named_dup(FastStack& stack, PycRef<PycCode> code, PycModule
         return;
     PycRef<ASTNode> top = stack.top();
     stack.pop();
-    if (!stack.empty() && stack.top() == chain->src())
+    PycRef<ASTNode> src = chain->src();
+    for (int n = 0; src != nullptr && src.type() == ASTNode::NODE_CHAINSTORE && n < 8; n++)
+        src = src.cast<ASTChainStore>()->src();
+    if (!stack.empty() && stack.top() == src)
         stack.pop();
     stack.push(top);
 }
 
-static bool ast_store_named_expr(PycRef<ASTNode> value, PycRef<ASTNode> name,
-                                 FastStack& stack, PycModule* mod)
+// A duplicated value stored into a target stays one chain: o.x = b = g(), not two calls
+static bool ast_keep_chain_target(PycRef<ASTNode> value, PycRef<ASTNode> target,
+                                  FastStack& stack, PycModule* mod, bool wasDup)
 {
-    if (mod->verCompare(3, 8) < 0 || value == nullptr || stack.empty() || stack.top() != value)
+    // An existing chain is extended by append_to_chain_store; wrapping it makes `a := 1`
+    // wasDup is the DUP_TOP/COPY 1 mark captured before the store popped this value
+    if (mod->verCompare(3, 8) < 0 || !wasDup || value == nullptr
+            || value.type() == ASTNode::NODE_CHAINSTORE
+            || stack.empty() || stack.top() != value)
         return false;
+    stack.pop();
+    ASTNodeList::list_t targets;
+    PycRef<ASTChainStore> chain = new ASTChainStore(targets, value);
+    chain->append(target);
+    stack.push(chain.cast<ASTNode>());
+    return true;
+}
+
+static bool ast_is_assign_store(int op)
+{
+    return op == Pyc::STORE_FAST_A || op == Pyc::STORE_NAME_A || op == Pyc::STORE_GLOBAL_A
+            || op == Pyc::STORE_DEREF_A || op == Pyc::STORE_ATTR_A || op == Pyc::STORE_SUBSCR
+            || op == Pyc::STORE_FAST_STORE_FAST_A || op == Pyc::STORE_FAST_LOAD_FAST_A;
+}
+
+// A bare STORE later in this run is one chain. COPY/DUP before every remaining store is nested :=.
+static bool ast_chain_extended_by_later_store(PycRef<PycCode> code, PycModule* mod, int pos)
+{
+    if (code == nullptr || code->code() == nullptr)
+        return false;
+    int op = 0, arg = 0, next = 0, at = pos;
+    for (int n = 0; n < 32; n++) {
+        if (!ast_read_wordcode_instr(code->code(), mod, at, op, arg, next))
+            return false;
+        at = next;
+        while (op == Pyc::CACHE) {
+            if (!ast_read_wordcode_instr(code->code(), mod, at, op, arg, next))
+                return false;
+            at = next;
+        }
+        if (op == Pyc::DUP_TOP || (op == Pyc::COPY_A && arg == 1)) {
+            if (!ast_read_wordcode_instr(code->code(), mod, at, op, arg, next))
+                return false;
+            at = next;
+            while (op == Pyc::CACHE) {
+                if (!ast_read_wordcode_instr(code->code(), mod, at, op, arg, next))
+                    return false;
+                at = next;
+            }
+            if (!ast_is_assign_store(op))
+                return false;
+            // STORE_FAST_STORE_FAST writes the last two targets and ends the chain
+            if (op == Pyc::STORE_FAST_STORE_FAST_A)
+                return true;
+            continue;
+        }
+        return ast_is_assign_store(op);
+    }
+    return false;
+}
+
+static bool ast_store_named_expr(PycRef<ASTNode> value, PycRef<ASTNode> name,
+                                 FastStack& stack, PycModule* mod, bool wasDup,
+                                 PycRef<PycCode> code, int pos)
+{
+    // A leftover null is not a copy of None. Only a recorded DUP_TOP or COPY 1 is.
+    if (mod->verCompare(3, 8) < 0 || !wasDup || stack.empty() || stack.top() != value)
+        return false;
+    if (value != nullptr && value.type() == ASTNode::NODE_CHAINSTORE) {
+        if (ast_chain_extended_by_later_store(code, mod, pos)) {
+            value.cast<ASTChainStore>()->append(name);
+            return true;
+        }
+        stack.pop();
+        ASTNodeList::list_t targets;
+        PycRef<ASTChainStore> named = new ASTChainStore(targets, value);
+        named->append(name);
+        named->setExpression(true);
+        stack.push(named.cast<ASTNode>());
+        return true;
+    }
+    // LOAD_CONST None is a null stack slot; two of them are still one None
+    if (value == nullptr)
+        value = new ASTObject(Pyc_None);
     stack.pop();
     ASTNodeList::list_t targets;
     PycRef<ASTChainStore> named = new ASTChainStore(targets, value);
@@ -9745,6 +10143,47 @@ static int cmp_prec(PycRef<ASTNode> parent, PycRef<ASTNode> child)
     return -1;
 }
 
+static bool ast_is_yield_expr(PycRef<ASTNode> node)
+{
+    if (node == nullptr)
+        return false;
+    if (node.type() == ASTNode::NODE_RETURN) {
+        int kind = node.cast<ASTReturn>()->rettype();
+        return kind == ASTReturn::YIELD || kind == ASTReturn::YIELD_FROM;
+    }
+    return node.type() == ASTNode::NODE_AWAITABLE && node.cast<ASTAwaitable>()->yieldFrom();
+}
+
+static bool ast_is_await_expr(PycRef<ASTNode> node)
+{
+    return node != nullptr && node.type() == ASTNode::NODE_AWAITABLE
+            && !node.cast<ASTAwaitable>()->yieldFrom();
+}
+
+// Names, calls, attributes and subscripts are primaries; await's operand must be one
+static bool ast_is_await_primary(PycRef<ASTNode> node)
+{
+    if (node == nullptr)
+        return true;
+    switch (node.type()) {
+    case ASTNode::NODE_NAME:
+    case ASTNode::NODE_OBJECT:
+    case ASTNode::NODE_CALL:
+    case ASTNode::NODE_SUBSCR:
+    case ASTNode::NODE_SLICE:
+    case ASTNode::NODE_TUPLE:
+    case ASTNode::NODE_LIST:
+    case ASTNode::NODE_SET:
+    case ASTNode::NODE_MAP:
+    case ASTNode::NODE_CONST_MAP:
+        return true;
+    case ASTNode::NODE_BINARY:
+        return node.cast<ASTBinary>()->op() == ASTBinary::BIN_ATTR;
+    default:
+        return false;
+    }
+}
+
 static void print_ordered(PycRef<ASTNode> parent, PycRef<ASTNode> child,
                           PycModule* mod, std::ostream& pyc_output)
 {
@@ -9765,9 +10204,27 @@ static void print_ordered(PycRef<ASTNode> parent, PycRef<ASTNode> child,
         } else {
             print_src(child, mod, pyc_output);
         }
+    } else if (ast_is_yield_expr(child)) {
+        // yield is only an expression inside parentheses, except as a whole assignment RHS
+        pyc_output << "(";
+        print_src(child, mod, pyc_output);
+        pyc_output << ")";
+    } else if (ast_is_await_expr(child) && parent.type() == ASTNode::NODE_UNARY) {
+        pyc_output << "(";
+        print_src(child, mod, pyc_output);
+        pyc_output << ")";
     } else {
         print_src(child, mod, pyc_output);
     }
+}
+
+static void print_paren_expr(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output, bool paren)
+{
+    if (paren)
+        pyc_output << "(";
+    print_src(node, mod, pyc_output);
+    if (paren)
+        pyc_output << ")";
 }
 
 static const int MAX_PRINT_INDENT = 512;
@@ -9876,8 +10333,13 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
         {
             PycRef<ASTBinary> bin = node.cast<ASTBinary>();
             PycRef<ASTCompare> cmp = node.try_cast<ASTCompare>();
+            bool parenLeft = ast_is_yield_expr(bin->left())
+                    || (ast_is_await_expr(bin->left())
+                        && (bin->op() == ASTBinary::BIN_ATTR || bin->op() == ASTBinary::BIN_POWER));
             if (cmp != nullptr && cmp->chained())
-                print_src(bin->left(), mod, pyc_output);
+                print_paren_expr(bin->left(), mod, pyc_output, parenLeft);
+            else if (parenLeft)
+                print_paren_expr(bin->left(), mod, pyc_output, true);
             else
                 print_ordered(node, bin->left(), mod, pyc_output);
             pyc_output << bin->op_str();
@@ -9897,13 +10359,14 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
     case ASTNode::NODE_CALL:
         {
             PycRef<ASTCall> call = node.cast<ASTCall>();
-            print_src(call->func(), mod, pyc_output);
+            print_paren_expr(call->func(), mod, pyc_output,
+                    ast_is_await_expr(call->func()) || ast_is_yield_expr(call->func()));
             pyc_output << "(";
             bool first = true;
             for (const auto& param : call->pparams()) {
                 if (!first)
                     pyc_output << ", ";
-                print_src(param, mod, pyc_output);
+                print_paren_expr(param, mod, pyc_output, ast_is_yield_expr(param));
                 first = false;
             }
             for (const auto& param : call->kwparams()) {
@@ -10247,8 +10710,13 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
         }
         break;
     case ASTNode::NODE_AWAITABLE:
-        pyc_output << (node.cast<ASTAwaitable>()->yieldFrom() ? "yield from " : "await ");
-        print_src(node.cast<ASTAwaitable>()->expression(), mod, pyc_output);
+        {
+            PycRef<ASTNode> expr = node.cast<ASTAwaitable>()->expression();
+            pyc_output << (node.cast<ASTAwaitable>()->yieldFrom() ? "yield from " : "await ");
+            // await binds tighter than +/**/unary, so a non-primary operand needs parentheses
+            print_paren_expr(expr, mod, pyc_output,
+                    !node.cast<ASTAwaitable>()->yieldFrom() && !ast_is_await_primary(expr));
+        }
         break;
     case ASTNode::NODE_RETURN:
         {
@@ -10260,7 +10728,16 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
                     pyc_output << "return ";
                     break;
                 case ASTReturn::YIELD:
-                    pyc_output << "yield ";
+                    pyc_output << "yield";
+                    // Bare `yield` is YIELD_VALUE of None; printing the None changes the statement
+                    if (value == nullptr
+                            || (value.type() == ASTNode::NODE_OBJECT
+                                && value.cast<ASTObject>()->object() != nullptr
+                                && value.cast<ASTObject>()->object().type() == PycObject::TYPE_NONE)) {
+                        value = nullptr;
+                        break;
+                    }
+                    pyc_output << " ";
                     break;
                 case ASTReturn::YIELD_FROM:
                     if (value.type() == ASTNode::NODE_AWAITABLE) {
@@ -10272,7 +10749,10 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
                     break;
                 }
             }
-            print_src(value, mod, pyc_output);
+            if (value != nullptr)
+                print_src(value, mod, pyc_output);
+            else if (inLambda || node.cast<ASTReturn>()->rettype() == ASTReturn::RETURN)
+                pyc_output << "None";
         }
         break;
     case ASTNode::NODE_SLICE:
@@ -10428,7 +10908,7 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
                         pyc_output << "\n";
                     }
                     start_line(cur_indent, pyc_output);
-                    if (code_src->flags() & PycCode::CO_COROUTINE)
+                    if (code_src->flags() & (PycCode::CO_COROUTINE | PycCode::CO_ASYNC_GENERATOR))
                         pyc_output << "async ";
                     pyc_output << "def ";
                     print_src(dest, mod, pyc_output);
@@ -10633,9 +11113,12 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
         break;
     case ASTNode::NODE_SUBSCR:
         {
-            print_src(node.cast<ASTSubscr>()->name(), mod, pyc_output);
+            print_paren_expr(node.cast<ASTSubscr>()->name(), mod, pyc_output,
+                    ast_is_await_expr(node.cast<ASTSubscr>()->name())
+                    || ast_is_yield_expr(node.cast<ASTSubscr>()->name()));
             pyc_output << "[";
-            print_src(node.cast<ASTSubscr>()->key(), mod, pyc_output);
+            print_paren_expr(node.cast<ASTSubscr>()->key(), mod, pyc_output,
+                    ast_is_yield_expr(node.cast<ASTSubscr>()->key()));
             pyc_output << "]";
         }
         break;
@@ -10738,6 +11221,68 @@ bool print_docstring(PycRef<PycObject> obj, int indent, PycModule* mod,
 
 static std::unordered_set<PycCode *> code_seen;
 
+// A free variable that this code stores is a nonlocal; a read-only free var needs no declaration
+static void ast_print_nonlocals(PycRef<PycCode> code, PycModule* mod, int indent, std::ostream& pyc_output)
+{
+    if (mod->verCompare(3, 0) < 0 || code == nullptr || code->code() == nullptr)
+        return;
+    // 3.11+ stores free-var names in localsplus; the kind byte 0x80 is CO_FAST_FREE
+    std::set<int> freeIndex;
+    std::set<std::string> frees;
+    if (mod->verCompare(3, 11) >= 0 && code->localKinds() != nullptr
+            && code->localKinds()->value() != nullptr) {
+        const char* kinds = code->localKinds()->value();
+        int n = code->localKinds()->length();
+        for (int i = 0; i < n; i++) {
+            if ((unsigned char)kinds[i] & 0x80)
+                freeIndex.insert(i);
+        }
+    } else if (code->freeVars() != nullptr) {
+        for (int i = 0; i < code->freeVars()->size(); i++) {
+            PycRef<PycString> name = code->freeVars()->get(i).try_cast<PycString>();
+            if (name != nullptr)
+                frees.insert(name->value());
+        }
+    }
+    if (freeIndex.empty() && frees.empty())
+        return;
+    std::vector<std::string> assigned;
+    std::set<std::string> seen;
+    PycBuffer src(code->code()->value(), code->code()->length());
+    int op = 0, arg = 0, pos = 0;
+    while (!src.atEof()) {
+        bc_next(src, mod, op, arg, pos);
+        if (op != Pyc::STORE_DEREF_A && op != Pyc::DELETE_DEREF_A)
+            continue;
+        PycRef<PycString> name;
+        if (!freeIndex.empty()) {
+            if (!freeIndex.count(arg))
+                continue;
+            name = code->getLocal(arg);
+        } else {
+            name = code->getCellVar(mod, arg);
+        }
+        if (name == nullptr)
+            continue;
+        std::string text = name->value();
+        if (!frees.empty() && !frees.count(text))
+            continue;
+        if (!seen.insert(text).second)
+            continue;
+        assigned.push_back(text);
+    }
+    if (assigned.empty())
+        return;
+    start_line(indent, pyc_output);
+    pyc_output << "nonlocal ";
+    for (size_t i = 0; i < assigned.size(); i++) {
+        if (i != 0)
+            pyc_output << ", ";
+        pyc_output << unmangle_name(assigned[i].c_str());
+    }
+    pyc_output << "\n";
+}
+
 /* A `return` is invalid at module scope, yet implicit returns can end up before
    linearly decoded exception-cleanup blocks as well as at the physical end.
    Strip every module return, recursively through module-level blocks. Only called on
@@ -10765,6 +11310,17 @@ void decompyle(PycRef<PycCode> code, PycModule* mod, std::ostream& pyc_output)
     PycRef<ASTNode> source = BuildFromCode(code, mod);
 
     PycRef<ASTNodeList> clean = source.cast<ASTNodeList>();
+    // Compiler epilogue of a generator is `return None`; a valued return is illegal in an async generator
+    if (clean != nullptr && clean->nodes().size() != 0
+            && (code->flags() & (PycCode::CO_GENERATOR | PycCode::CO_ASYNC_GENERATOR))
+            && clean->nodes().back().type() == ASTNode::NODE_RETURN) {
+        PycRef<ASTReturn> ret = clean->nodes().back().cast<ASTReturn>();
+        PycRef<ASTObject> retObj = ret->value().try_cast<ASTObject>();
+        if (ret->rettype() == ASTReturn::RETURN
+                && (ret->value() == nullptr
+                    || (retObj != nullptr && retObj->object().type() == PycObject::TYPE_NONE)))
+            clean->removeLast();
+    }
     if (cleanBuild && clean->nodes().size() != 0) {
         // The Python compiler adds some stuff that we don't really care
         // about, and would add extra code for re-compilation anyway.
@@ -10815,8 +11371,9 @@ void decompyle(PycRef<PycCode> code, PycModule* mod, std::ostream& pyc_output)
             PycRef<ASTReturn> ret = clean->nodes().back().cast<ASTReturn>();
 
             PycRef<ASTObject> retObj = ret->value().try_cast<ASTObject>();
-            if (ret->value() == NULL || ret->value().type() == ASTNode::NODE_LOCALS ||
-                    (retObj && retObj->object().type() == PycObject::TYPE_NONE)) {
+            if (ret->rettype() == ASTReturn::RETURN
+                    && (ret->value() == NULL || ret->value().type() == ASTNode::NODE_LOCALS ||
+                    (retObj && retObj->object().type() == PycObject::TYPE_NONE))) {
                 clean->removeLast();  // Always an extraneous return statement
             }
         }
@@ -10856,6 +11413,14 @@ void decompyle(PycRef<PycCode> code, PycModule* mod, std::ostream& pyc_output)
            module scope), even when nested in a trailing block. */
         if (code->name()->isEqual("<module>") && mod->verCompare(3, 11) >= 0)
             StripModuleReturns(clean.cast<ASTNode>());
+        else if (code->name()->isEqual("<module>") && mod->verCompare(3, 0) >= 0) {
+            // A return nested in a block is not legal at module scope. The module's own
+            // trailing return is left in place; older tests compare that text.
+            for (const auto& child : clean->nodes()) {
+                if (child != nullptr && child.type() == ASTNode::NODE_BLOCK)
+                    StripModuleReturns(child);
+            }
+        }
     }
     if (printClassDocstring)
         printClassDocstring = false;
@@ -10886,6 +11451,7 @@ void decompyle(PycRef<PycCode> code, PycModule* mod, std::ostream& pyc_output)
             }
             pyc_output << "\n";
         }
+        ast_print_nonlocals(code, mod, cur_indent + 1, pyc_output);
         printDocstringAndGlobals = false;
     }
 

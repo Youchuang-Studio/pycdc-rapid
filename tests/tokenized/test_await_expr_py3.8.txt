@@ -1,0 +1,57 @@
+async def f_attr ( q ) : <EOL>
+<INDENT>
+return ( await q . get ( ) ) . x <EOL>
+<OUTDENT>
+async def f_item ( q ) : <EOL>
+<INDENT>
+return ( await q . get ( ) ) [ 0 ] <EOL>
+<OUTDENT>
+async def f_call ( q ) : <EOL>
+<INDENT>
+return ( await q . get ( ) ) ( ) <EOL>
+<OUTDENT>
+async def f_neg ( q ) : <EOL>
+<INDENT>
+return - ( await q . get ( ) ) <EOL>
+<OUTDENT>
+async def f_pow ( q ) : <EOL>
+<INDENT>
+return ( await q . get ( ) ) ** 2 <EOL>
+<OUTDENT>
+async def f_sum ( a , b ) : <EOL>
+<INDENT>
+return await ( a + b ) <EOL>
+<OUTDENT>
+async def f_finally ( q ) : <EOL>
+<INDENT>
+try : <EOL>
+<INDENT>
+g ( ) <EOL>
+<OUTDENT>
+finally : <EOL>
+<INDENT>
+await q . close ( ) <EOL>
+<OUTDENT>
+<OUTDENT>
+async def f_agen ( q ) : <EOL>
+<INDENT>
+yield await q . get ( ) <EOL>
+<OUTDENT>
+def f_yf ( g ) : <EOL>
+<INDENT>
+h ( ( yield from g ) ) <EOL>
+<OUTDENT>
+def f_yf_assign ( g ) : <EOL>
+<INDENT>
+x = yield from g <EOL>
+return x <EOL>
+<OUTDENT>
+def f_yield ( ) : <EOL>
+<INDENT>
+x = yield 1 <EOL>
+return x <EOL>
+<OUTDENT>
+def f_bare ( ) : <EOL>
+<INDENT>
+yield 1 <EOL>
+yield <EOL>
