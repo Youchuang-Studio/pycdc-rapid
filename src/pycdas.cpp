@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
+#include <cmath>
 #include <string>
 #include <iostream>
 #include <fstream>
@@ -256,11 +257,17 @@ void output_object(PycRef<PycObject> obj, PycModule* mod, int indent,
                                       obj.cast<PycComplex>()->imag());
         break;
     case PycObject::TYPE_BINARY_FLOAT:
-        iprintf(pyc_output, indent, "%g\n", obj.cast<PycCFloat>()->value());
+        {
+            double value = obj.cast<PycCFloat>()->value();
+            if (std::isfinite(value))
+                iprintf(pyc_output, indent, "%s\n", format_float_repr(value, true).c_str());
+            else
+                iprintf(pyc_output, indent, "%g\n", value);
+        }
         break;
     case PycObject::TYPE_BINARY_COMPLEX:
-        iprintf(pyc_output, indent, "(%g+%gj)\n", obj.cast<PycCComplex>()->value(),
-                                      obj.cast<PycCComplex>()->imag());
+        iprintf(pyc_output, indent, "%s\n", format_complex_repr(obj.cast<PycCComplex>()->value(),
+                                      obj.cast<PycCComplex>()->imag()).c_str());
         break;
     default:
         iprintf(pyc_output, indent, "<TYPE: %d>\n", obj->type());

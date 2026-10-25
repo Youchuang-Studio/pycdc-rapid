@@ -1,3 +1,4 @@
+#include <string>
 #include "pyc_code.h"
 #include "pyc_module.h"
 #include "data.h"
@@ -27,6 +28,8 @@ int ByteToOpcode(int maj, int min, int opcode);
 
 }
 
+std::string format_float_repr(double value, bool keepPoint);
+std::string format_complex_repr(double real, double imag);
 void print_const(std::ostream& pyc_output, PycRef<PycObject> obj, PycModule* mod,
                  const char* parent_f_string_quote = nullptr);
 void bc_next(PycBuffer& source, PycModule* mod, int& opcode, int& operand, int& pos);

@@ -2,7 +2,10 @@
 #include "bytecode.h"
 #include <stdexcept>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
+#include <string>
 
 #ifdef _MSC_VER
 #define snprintf _snprintf
@@ -117,6 +120,70 @@ int Pyc::ByteToOpcode(int maj, int min, int opcode)
         break;
     }
     return PYC_INVALID_OPCODE;
+}
+
+// Python repr() of a finite double: shortest round-trip digits, fixed notation for 1e-4 <= |x| < 1e16
+std::string format_float_repr(double value, bool keepPoint)
+{
+    char buf[64];
+    for (int prec = 0; prec <= 16; prec++) {
+        snprintf(buf, sizeof(buf), "%.*e", prec, value);
+        buf[sizeof(buf) - 1] = '\0';
+        if (strtod(buf, nullptr) == value)
+            break;
+    }
+    std::string text(buf);
+    size_t ePos = text.find('e');
+    if (ePos == std::string::npos)
+        return text;
+    int exponent = atoi(text.c_str() + ePos + 1);
+    std::string digits;
+    for (size_t i = 0; i < ePos; i++) {
+        if (text[i] >= '0' && text[i] <= '9')
+            digits += text[i];
+    }
+    while (digits.size() > 1 && digits.back() == '0')
+        digits.pop_back();
+    std::string out = std::signbit(value) ? "-" : "";
+    int decpt = exponent + 1;
+    if (decpt > -4 && decpt <= 16) {
+        if (decpt <= 0) {
+            out += "0." + std::string(-decpt, '0') + digits;
+        } else if (decpt >= (int)digits.size()) {
+            out += digits + std::string(decpt - digits.size(), '0');
+            if (keepPoint)
+                out += ".0";
+        } else {
+            out += digits.substr(0, decpt) + "." + digits.substr(decpt);
+        }
+    } else {
+        out += digits.substr(0, 1);
+        if (digits.size() > 1)
+            out += "." + digits.substr(1);
+        char expBuf[16];
+        snprintf(expBuf, sizeof(expBuf), "e%c%02d", exponent < 0 ? '-' : '+', exponent < 0 ? -exponent : exponent);
+        expBuf[sizeof(expBuf) - 1] = '\0';
+        out += expBuf;
+    }
+    return out;
+}
+
+// Python repr() of a complex constant; non-finite parts keep the old %g form
+std::string format_complex_repr(double real, double imag)
+{
+    if (!std::isfinite(real) || !std::isfinite(imag)) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "(%g+%gj)", real, imag);
+        buf[sizeof(buf) - 1] = '\0';
+        return buf;
+    }
+    std::string im = format_float_repr(imag, false) + "j";
+    if (real == 0.0 && !std::signbit(real))
+        return im;
+    std::string out = "(" + format_float_repr(real, false);
+    if (im[0] != '-')
+        out += "+";
+    return out + im + ")";
 }
 
 void print_const(std::ostream& pyc_output, PycRef<PycObject> obj, PycModule* mod,
@@ -275,13 +342,13 @@ void print_const(std::ostream& pyc_output, PycRef<PycObject> obj, PycModule* mod
                     pyc_output << "float('inf')";
                 }
             } else {
-                formatted_print(pyc_output, "%g", value);
+                pyc_output << format_float_repr(value, true);
             }
         }
         break;
     case PycObject::TYPE_BINARY_COMPLEX:
-        formatted_print(pyc_output, "(%g+%gj)", obj.cast<PycCComplex>()->value(),
-                                        obj.cast<PycCComplex>()->imag());
+        pyc_output << format_complex_repr(obj.cast<PycCComplex>()->value(),
+                                          obj.cast<PycCComplex>()->imag());
         break;
     case PycObject::TYPE_CODE:
     case PycObject::TYPE_CODE2:
