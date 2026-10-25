@@ -1,3 +1,4 @@
+#include <climits>
 #include <cstring>
 #include <cstdint>
 #include <stdexcept>
